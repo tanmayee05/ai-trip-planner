@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+venv/
+*.db
+
+# local caches (safe to delete; regenerated on demand)
+.overpass_cache/
+.geo_cache/
+.route_cache/

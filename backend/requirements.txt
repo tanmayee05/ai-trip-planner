@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+google-genai
+python-dotenv
+langchain-core
+langchain-google-genai
+requests
+
+# --- auth (Step 1 of the frontend build) ---
+bcrypt              # password hashing (slow, salted) — never store plaintext
+PyJWT               # signed JSON Web Tokens = stateless login sessions
+email-validator     # lets Pydantic's EmailStr reject malformed emails

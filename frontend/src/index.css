@@ -1,0 +1,147 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-cream text-ink font-sans antialiased;
+    margin: 0;
+    min-height: 100vh;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-display font-extrabold tracking-tight text-ink;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme("colors.brand.300") transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: theme("colors.brand.300");
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+@layer components {
+  /* ---- CARDS : thick outline + hard drop shadow (sticker-book) ---- */
+  .card {
+    @apply rounded-3xl border-2 border-ink/10 bg-paper shadow-chunky
+      transition-[transform,box-shadow] duration-200;
+  }
+  .card-hover {
+    @apply hover:-translate-y-1 hover:shadow-chunky-lg hover:border-ink/20;
+  }
+  /* tinted variants for section colour-coding */
+  .card-teal { @apply border-teal-500/30 bg-teal-100/50; }
+  .card-sunny { @apply border-sunny/40 bg-sunny/10; }
+  .card-sky { @apply border-sky/30 bg-sky/10; }
+  .card-grape { @apply border-grape/25 bg-grape/5; }
+
+  /* ---- BUTTONS : chunky press-down ---- */
+  .btn {
+    @apply relative inline-flex select-none items-center justify-center gap-2
+      rounded-2xl border-2 border-ink px-4 py-2.5 text-sm font-bold
+      transition-[transform,box-shadow,background-color] duration-100
+      focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-300
+      disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-brand-500 text-white
+      shadow-[0_5px_0_0_theme("colors.ink.DEFAULT")]
+      hover:bg-brand-400
+      active:translate-y-[4px] active:shadow-[0_1px_0_0_theme("colors.ink.DEFAULT")];
+  }
+  .btn-teal {
+    @apply btn bg-teal-500 text-white
+      shadow-[0_5px_0_0_theme("colors.ink.DEFAULT")]
+      hover:bg-teal-400
+      active:translate-y-[4px] active:shadow-[0_1px_0_0_theme("colors.ink.DEFAULT")];
+  }
+  .btn-ghost {
+    @apply btn border-transparent bg-transparent font-semibold text-ink-soft
+      hover:bg-ink/5 hover:text-ink;
+  }
+
+  .input {
+    @apply w-full rounded-2xl border-2 border-ink/15 bg-cream px-4 py-3 text-sm
+      font-medium text-ink transition
+      placeholder:font-normal placeholder:text-ink-faint
+      focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-200;
+  }
+
+  .label {
+    @apply mb-1.5 block text-[11px] font-extrabold uppercase tracking-wider text-ink-faint;
+  }
+
+  .gradient-text {
+    @apply bg-sunset bg-clip-text text-transparent;
+  }
+
+  /* big playful emoji/icon blob */
+  .blob-chip {
+    @apply grid h-11 w-11 shrink-0 place-items-center rounded-2xl border-2 border-ink/10
+      bg-brand-100 text-xl text-brand-700 shadow-chunky-sm;
+  }
+
+  /* sticker badge */
+  .sticker {
+    @apply inline-flex items-center gap-1 rounded-full border-2 border-ink/80
+      bg-sunny px-2.5 py-0.5 text-[11px] font-extrabold text-ink shadow-chunky-sm;
+  }
+
+  .skeleton {
+    @apply relative overflow-hidden rounded-xl bg-ink/5;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0 -translate-x-full animate-shimmer;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), transparent);
+  }
+}
+
+@layer utilities {
+  .dot-grid {
+    background-image: radial-gradient(rgba(36, 27, 46, 0.09) 1.6px, transparent 1.6px);
+    background-size: 22px 22px;
+  }
+
+  @keyframes wiggle {
+    0%, 100% { transform: rotate(0); }
+    25% { transform: rotate(-9deg); }
+    75% { transform: rotate(9deg); }
+  }
+  .hover-wiggle:hover { animation: wiggle 0.4s ease-in-out; }
+
+  @keyframes marker-drop {
+    0% { transform: translateY(-16px) scale(0.5); opacity: 0; }
+    60% { transform: translateY(4px) scale(1.08); opacity: 1; }
+    100% { transform: translateY(0) scale(1); opacity: 1; }
+  }
+  .marker-drop { animation: marker-drop 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+}
