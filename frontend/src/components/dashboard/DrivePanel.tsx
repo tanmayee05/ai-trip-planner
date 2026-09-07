@@ -1,12 +1,9 @@
 import { motion } from "framer-motion";
-import { Car, Route, Clock, Fuel, Info } from "lucide-react";
+import { Car, Route, Clock, RefreshCw, Info } from "lucide-react";
 
 import type { DriveResult } from "@/types/api";
 import { Counter } from "@/components/common/Counter";
 import { SectionHeader } from "@/components/common/SectionHeader";
-
-// rough running cost for a petrol car in India (fuel only), ₹/km
-const FUEL_COST_PER_KM = 7;
 
 interface Props {
   drive: DriveResult | null | undefined;
@@ -44,7 +41,7 @@ export function DrivePanel({ drive, routeLabel, hasStops }: Props) {
             <Stat
               icon={<Route className="h-4 w-4" />}
               value={<Counter value={drive.distance_km} suffix=" km" decimals={1} />}
-              label="distance"
+              label="one way"
             />
             <Stat
               icon={<Clock className="h-4 w-4" />}
@@ -52,9 +49,9 @@ export function DrivePanel({ drive, routeLabel, hasStops }: Props) {
               label="driving time"
             />
             <Stat
-              icon={<Fuel className="h-4 w-4" />}
-              value={<Counter value={Math.round(drive.distance_km * FUEL_COST_PER_KM)} prefix="≈ ₹" />}
-              label="fuel (one way)"
+              icon={<RefreshCw className="h-4 w-4" />}
+              value={<Counter value={Math.round(drive.distance_km * 2)} suffix=" km" />}
+              label="round trip"
             />
           </div>
 
@@ -63,6 +60,7 @@ export function DrivePanel({ drive, routeLabel, hasStops }: Props) {
               ? "Straight-line estimate — routing was unavailable, so treat this as a lower bound."
               : "Estimated at typical road speeds — not live traffic."}
             {hasStops && " Add the hops between your chosen stops on top of this."}
+            {" "}Set your vehicle in <strong>On the road</strong> below for fuel litres &amp; cost.
           </p>
         </motion.div>
       ) : (

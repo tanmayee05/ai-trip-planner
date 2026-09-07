@@ -12,11 +12,10 @@ import sqlite3
 from trip_slots import TripSlots, next_question
 from slot_extraction import update_slots
 from geocoding import geocode
-from connectivity import check_all_modes
 from attractions import get_attractions
-from itinerary import build_itinerary, region_center
-from routing import get_driving_route
-from distance import straight_line_distance_km
+from itinerary import region_center
+from agent import run_trip_plan   # the LangGraph trip-planning agent
+from enrichments import estimate_fuel, fuel_stops_along_route, enrich_food, enrich_stay
 """
 init_db(): Create database/tables if needed
 load_session():Retrieve existing conversation
@@ -217,78 +216,21 @@ def _geocode_or_400(place: str, label: str) -> dict:
     return hit
 
 
-def _drive_plan(src: dict, dst: dict) -> dict:
-    """Own-vehicle: road distance/time to the region. One ORS call; if ORS
-    can't route (e.g. the destination point is off-road), fall back to a
-    straight-line estimate so we still show something useful."""
-    route = get_driving_route(src["lat"], src["lon"], dst["lat"], dst["lon"])
-    if route:
-        return {"mode": "drive", "drive": {**route, "estimated": False}}
-
-    crow = straight_line_distance_km(src["lat"], src["lon"], dst["lat"], dst["lon"])
-    approx_km = round(crow * 1.3, 1)   # roads ~30% longer than the crow flies
-    return {
-        "mode": "drive",
-        "drive": {
-            "distance_km": approx_km,
-            "duration_hr": round(approx_km / 50, 1),  # ~50 km/h avg over a long drive
-            "estimated": True,
-        },
-    }
-
-
-def _estimate_costs(is_drive: bool, num_days: int | None, num_people: int | None,
-                    drive_km: float | None) -> dict:
-    """Rough per-trip cost breakdown. All figures are ball-park INR."""
-    days = max(1, num_days or 2)
-    people = max(1, num_people or 2)
-    nights = max(0, days - 1)
-
-    items = []
-    if is_drive and drive_km:
-        round_trip = round(drive_km * 2)
-        items.append({
-            "label": "Fuel (round trip)", "amount": round(round_trip * 7),
-            "note": f"~Rs 7/km x {round_trip} km",
-        })
-    items.append({
-        "label": "Food", "amount": 400 * people * days,
-        "note": f"~Rs 400 x {people} people x {days} days",
-    })
-    items.append({
-        "label": "Stay", "amount": 1500 * nights,
-        "note": f"~Rs 1500/night x {nights} night" + ("s" if nights != 1 else ""),
-    })
-
-    total = sum(i["amount"] for i in items)
-    return {
-        "items": items,
-        "total": total,
-        "assumptions": {"people": people, "days": days},
-        "note": "Ball-park only. Excludes train/flight/bus tickets and activities.",
-    }
-
-
 def _run_plan_job(job_id: str, req: PlanRequest, src: dict, dst: dict, user_id: int | None):
+    """Background worker: hand the trip to the LangGraph agent, then persist."""
     job = _PLAN_JOBS[job_id]
     travel_date = req.travel_date.isoformat()
     try:
-        is_drive = req.travel_mode == "own_vehicle"
-        if is_drive:
-            result = _drive_plan(src, dst)
-        else:
-            result = check_all_modes(
-                src["lat"], src["lon"], dst["lat"], dst["lon"],
-                travel_date=travel_date, destination_name=req.destination,
-            )
-
-        # carry the itinerary + a rough cost breakdown alongside the result,
-        # so both are saved and reopened from History for free
-        if job["itinerary"]:
-            result["itinerary"] = job["itinerary"]
-        result["costs"] = _estimate_costs(
-            is_drive, req.num_days, req.num_people,
-            drive_km=(result.get("drive") or {}).get("distance_km") if is_drive else None,
+        result = run_trip_plan(
+            source=req.source,
+            destination=req.destination,
+            travel_date=travel_date,
+            travel_mode=req.travel_mode,
+            num_days=req.num_days,
+            num_people=req.num_people,
+            source_geo=src,
+            dest_geo=dst,
+            stops=job["stops"],      # the agent reasons the day-by-day plan itself
         )
 
         if user_id is not None:  # remember it for logged-in users (History)
@@ -316,21 +258,18 @@ def _run_plan_job(job_id: str, req: PlanRequest, src: dict, dst: dict, user_id: 
 def start_plan(req: PlanRequest, user_id: int | None = Depends(get_optional_user_id)):
     src = _geocode_or_400(req.source, "source")  # always needed; bad name -> 422 fast
 
-    if req.stops:
+    stops = [s.model_dump() for s in req.stops]
+    if stops:
         # transport target = the CENTROID of the picked places, so the arrival
         # hub lands in the middle of the trip region (not a vague state point)
-        clat, clon = region_center([s.model_dump() for s in req.stops])
+        clat, clon = region_center(stops)
         dst = {
             "lat": clat, "lon": clon,
-            "display_name": f"{req.destination} — {len(req.stops)} stop"
-            + ("s" if len(req.stops) != 1 else ""),
+            "display_name": f"{req.destination} — {len(stops)} stop"
+            + ("s" if len(stops) != 1 else ""),
         }
-        itinerary = build_itinerary(
-            [s.model_dump() for s in req.stops], src["lat"], src["lon"], req.num_days
-        )
     else:
         dst = _geocode_or_400(req.destination, "destination")
-        itinerary = []
 
     job_id = str(uuid.uuid4())
     src_pt = GeoPoint(name=req.source, **src)
@@ -338,7 +277,7 @@ def start_plan(req: PlanRequest, user_id: int | None = Depends(get_optional_user
     _PLAN_JOBS[job_id] = {
         "state": "running", "result": None, "error": None, "trip_id": None,
         "source": src_pt, "destination": dst_pt, "travel_date": req.travel_date.isoformat(),
-        "itinerary": itinerary,
+        "stops": stops,              # the agent turns these into a day-by-day itinerary
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -346,10 +285,12 @@ def start_plan(req: PlanRequest, user_id: int | None = Depends(get_optional_user
         target=_run_plan_job, args=(job_id, req, src, dst, user_id), daemon=True
     ).start()
 
+    # the itinerary is computed by the agent, so it's not ready yet (empty here,
+    # populated in the final /plan/{job_id} result)
     return PlanJobStarted(
         job_id=job_id, state="running",
         source=src_pt, destination=dst_pt, travel_date=req.travel_date.isoformat(),
-        itinerary=itinerary,
+        itinerary=[],
     )
 
 
@@ -358,12 +299,68 @@ def plan_status(job_id: str):
     job = _PLAN_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="No such plan job (it may have expired on a server restart)")
+    result = job["result"] or {}
     return PlanJobStatus(
         job_id=job_id, state=job["state"],
         source=job["source"], destination=job["destination"], travel_date=job["travel_date"],
-        itinerary=job["itinerary"],
+        itinerary=result.get("itinerary", []),
         trip_id=job["trip_id"], result=job["result"], error=job["error"],
     )
+
+
+# --------------------------------------------------------------------------
+# Own-vehicle enrichments — called on demand when the user taps "yes" on an
+# offer, or asks in chat. Fuel is quick; food/stay (Step C-2) are LLM-backed.
+# --------------------------------------------------------------------------
+class FuelParams(BaseModel):
+    mileage_kmpl: float = Field(gt=0, le=120)
+    fuel_type: Literal["petrol", "diesel", "cng"] = "petrol"
+
+
+class LatLon(BaseModel):
+    lat: float
+    lon: float
+
+
+class EnrichRequest(BaseModel):
+    kind: Literal["fuel", "fuel_stops", "food", "stay"]
+    distance_km: float | None = None
+    drive_hours: float | None = None
+    geometry: list[list[float]] = []        # [[lat, lon], ...] downsampled route from result.drive.geometry
+    source: LatLon | None = None            # endpoints — used to draw a fallback line if geometry is missing
+    destination: LatLon | None = None
+    fuel: FuelParams | None = None
+    company: str | None = None              # HP / Indian Oil / Bharat Petroleum / Shell / ...
+    preference: Literal["snacks", "meals", "tiffins", "any"] = "any"
+    radius_km: int = Field(default=15, ge=1, le=600)   # how far from "here" to look for food / a hotel
+    note: str | None = None                 # optional extra ask ("veg only", "near a temple", ...)
+
+
+@app.post("/plan/enrich")
+def enrich(req: EnrichRequest):
+    src = req.source.model_dump() if req.source else None
+    dst = req.destination.model_dump() if req.destination else None
+
+    if req.kind == "fuel":
+        if not (req.fuel and req.distance_km):
+            raise HTTPException(status_code=422, detail="fuel enrichment needs distance_km + fuel params")
+        return {"kind": "fuel", "fuel": estimate_fuel(
+            req.distance_km, req.fuel.mileage_kmpl, req.fuel.fuel_type, req.company,
+        )}
+
+    if req.kind == "fuel_stops":
+        if not req.geometry:
+            raise HTTPException(status_code=422, detail="fuel_stops needs the route geometry")
+        return {"kind": "fuel_stops",
+                "stops": fuel_stops_along_route(req.geometry, company=req.company)}
+
+    if req.kind == "food":
+        return enrich_food(req.geometry, req.radius_km, req.preference, req.note, src, dst)
+
+    if req.kind == "stay":
+        return enrich_stay(req.geometry, req.radius_km, req.note, src, dst)
+
+    raise HTTPException(status_code=422, detail=f"unknown enrichment kind '{req.kind}'")
 
 
 # ==========================================================================

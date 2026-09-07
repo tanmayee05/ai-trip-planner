@@ -9,6 +9,7 @@ import { ItineraryPanel } from "@/components/dashboard/ItineraryPanel";
 import { MapPanel } from "@/components/dashboard/MapPanel";
 import { RecommendationsPanel } from "@/components/dashboard/RecommendationsPanel";
 import { DrivePanel } from "@/components/dashboard/DrivePanel";
+import { DriveAssistant } from "@/components/dashboard/DriveAssistant";
 import { HistoryDrawer } from "@/components/dashboard/HistoryDrawer";
 import { PlanningProgress } from "@/components/dashboard/PlanningProgress";
 import { CostEstimate } from "@/components/dashboard/CostEstimate";
@@ -18,7 +19,7 @@ import { Confetti } from "@/components/common/Confetti";
 import { usePlanJob } from "@/hooks/usePlanJob";
 import { prettyDate } from "@/lib/format";
 import type { PlanInput, PlanStop } from "@/api/plan";
-import type { PlanJob, TripDetail } from "@/types/api";
+import type { PlanJob, RouteMarker, TripDetail } from "@/types/api";
 
 const zone = {
   hidden: { opacity: 0, y: 16 },
@@ -38,6 +39,8 @@ export function DashboardPage() {
   const [pickedNames, setPickedNames] = useState<string[]>([]);
   // the full last-submitted input — re-seeds the form so you can tweak & re-plan
   const [lastInput, setLastInput] = useState<PlanInput | null>(null);
+
+  const [routeMarkers, setRouteMarkers] = useState<RouteMarker[]>([]);
 
   const running = plan.phase === "running";
   const job = plan.job;
@@ -68,6 +71,7 @@ export function DashboardPage() {
     setPickedNames(stops.map((s) => s.name));
     const full = { ...draft, stops };
     setLastInput(full);
+    setRouteMarkers([]); // clear route pins from the previous plan
     plan.run(full);
     setDraft(null);
   }
@@ -231,7 +235,11 @@ export function DashboardPage() {
                   )}
                   {itinerary.length > 0 && (
                     <motion.div variants={zone} custom={0} initial="hidden" animate="show">
-                      <ItineraryPanel itinerary={itinerary} onEdit={editStops} />
+                      <ItineraryPanel
+                        itinerary={itinerary}
+                        notes={result?.itinerary_notes}
+                        onEdit={editStops}
+                      />
                     </motion.div>
                   )}
                   <motion.div variants={zone} custom={1} initial="hidden" animate="show">
@@ -239,6 +247,8 @@ export function DashboardPage() {
                       source={job?.source}
                       destination={job?.destination}
                       itinerary={itinerary}
+                      routeLine={isDrive ? result?.drive?.geometry : undefined}
+                      routeMarkers={routeMarkers}
                     />
                   </motion.div>
                   <motion.div variants={zone} custom={2} initial="hidden" animate="show">
@@ -252,8 +262,20 @@ export function DashboardPage() {
                       <RecommendationsPanel result={result} routeLabel={routeLabel || undefined} />
                     )}
                   </motion.div>
-                  {result?.costs && (
+                  {isDrive && result?.drive && (
                     <motion.div variants={zone} custom={3} initial="hidden" animate="show">
+                      <DriveAssistant
+                        drive={result.drive}
+                        offers={result.offers ?? []}
+                        tolls={result.tolls}
+                        source={job?.source}
+                        destination={job?.destination}
+                        onRouteMarkers={setRouteMarkers}
+                      />
+                    </motion.div>
+                  )}
+                  {result?.costs && (
+                    <motion.div variants={zone} custom={4} initial="hidden" animate="show">
                       <CostEstimate costs={result.costs} />
                     </motion.div>
                   )}

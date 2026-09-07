@@ -4,14 +4,23 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { LocateFixed } from "lucide-react";
 
-import type { GeoPoint, ItineraryStop } from "@/types/api";
+import type { GeoPoint, ItineraryStop, RouteMarker } from "@/types/api";
 import { Companion } from "@/components/decor/Companion";
 
 interface Props {
   source?: GeoPoint;
   destination?: GeoPoint;
   itinerary?: ItineraryStop[];
+  routeLine?: [number, number][]; // [lat, lon] road path (own-vehicle)
+  routeMarkers?: RouteMarker[]; // fuel / food / stay pins along the route
 }
+
+const ROUTE_ICON: Record<RouteMarker["kind"], { bg: string; glyph: string }> = {
+  fuel: { bg: "#FFB93B", glyph: "⛽" },
+  food: { bg: "#FF5C8A", glyph: "🍽️" },
+  stay: { bg: "#37D98E", glyph: "🛏️" },
+  toll: { bg: "#8B5CF6", glyph: "🎫" },
+};
 
 type LatLng = [number, number];
 
@@ -35,6 +44,33 @@ const youIcon = L.divIcon({
   iconAnchor: [8, 8],
 });
 
+function routeIcon(kind: RouteMarker["kind"]) {
+  const { bg, glyph } = ROUTE_ICON[kind];
+  return L.divIcon({
+    className: "",
+    html: `<span style="display:grid;place-items:center;width:20px;height:20px;border-radius:6px;
+      background:${bg};border:2px solid #241C46;font-size:10px">${glyph}</span>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+  });
+}
+
+/** Pins that resolved to the same fallback coordinate (a start point or a
+ *  route sample) would stack invisibly. Fan duplicates out on a small spiral
+ *  so every food / hotel / pump is clickable. */
+function fanOut(markers: RouteMarker[]): RouteMarker[] {
+  const seen = new Map<string, number>();
+  return markers.map((m) => {
+    const key = `${m.lat.toFixed(3)},${m.lon.toFixed(3)}`;
+    const n = seen.get(key) ?? 0;
+    seen.set(key, n + 1);
+    if (n === 0) return m;
+    const ang = n * 137.5 * (Math.PI / 180); // golden-angle scatter
+    const r = 0.004 + 0.003 * Math.floor(n / 8); // ~450 m rings, widening
+    return { ...m, lat: m.lat + r * Math.cos(ang), lon: m.lon + r * Math.sin(ang) };
+  });
+}
+
 function FitBounds({ points }: { points: LatLng[] }) {
   const map = useMap();
   useEffect(() => {
@@ -48,7 +84,7 @@ function FitBounds({ points }: { points: LatLng[] }) {
   return null;
 }
 
-export function MapPanel({ source, destination, itinerary = [] }: Props) {
+export function MapPanel({ source, destination, itinerary = [], routeLine, routeMarkers = [] }: Props) {
   const [you, setYou] = useState<LatLng | null>(null);
 
   useEffect(() => {
@@ -65,14 +101,17 @@ export function MapPanel({ source, destination, itinerary = [] }: Props) {
     [itinerary],
   );
 
+  const pins = useMemo(() => fanOut(routeMarkers), [routeMarkers]);
+
   const all: LatLng[] = useMemo(() => {
     const pts: LatLng[] = [];
     if (source) pts.push([source.lat, source.lon]);
     if (destination) pts.push([destination.lat, destination.lon]);
     pts.push(...stops);
+    for (const m of pins) pts.push([m.lat, m.lon]);
     if (you) pts.push(you);
     return pts;
-  }, [source, destination, stops, you]);
+  }, [source, destination, stops, pins, you]);
 
   const hasData = !!source || !!destination || stops.length > 0;
 
@@ -117,6 +156,24 @@ export function MapPanel({ source, destination, itinerary = [] }: Props) {
               </Popup>
             </Marker>
           ))}
+
+          {pins.map((m, i) => (
+            <Marker
+              key={`rm-${i}`}
+              position={[m.lat, m.lon]}
+              icon={routeIcon(m.kind)}
+              zIndexOffset={1000}
+            >
+              <Popup>
+                <strong>{m.name}</strong>
+                {m.sub && <div style={{ marginTop: 2 }}>{m.sub}</div>}
+              </Popup>
+            </Marker>
+          ))}
+
+          {routeLine && routeLine.length > 1 && (
+            <Polyline positions={routeLine} pathOptions={{ color: "#6C4CF1", weight: 4, opacity: 0.8 }} />
+          )}
 
           {stops.length > 1 && (
             <Polyline positions={stops} pathOptions={{ color: "#6C4CF1", weight: 3, dashArray: "6 8" }} />

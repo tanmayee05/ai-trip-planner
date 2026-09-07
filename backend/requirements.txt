@@ -3,11 +3,14 @@ uvicorn
 pydantic
 google-genai
 python-dotenv
-langchain-core
+langchain-core>=1.6.1
 langchain-google-genai
 requests
 
-# --- auth (Step 1 of the frontend build) ---
+# --- auth ---
 bcrypt              # password hashing (slow, salted) — never store plaintext
 PyJWT               # signed JSON Web Tokens = stateless login sessions
 email-validator     # lets Pydantic's EmailStr reject malformed emails
+
+# --- agent ---
+langgraph           # the trip-planning agent is a LangGraph StateGraph (see agent.py)

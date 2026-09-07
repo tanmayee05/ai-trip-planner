@@ -11,9 +11,10 @@ import {
   Droplets,
   MapPin,
   Pencil,
+  Sparkles,
 } from "lucide-react";
 
-import type { ItineraryStop } from "@/types/api";
+import type { ItineraryNote, ItineraryStop } from "@/types/api";
 import { SectionHeader } from "@/components/common/SectionHeader";
 
 const CAT_ICON: Record<string, typeof Mountain> = {
@@ -32,10 +33,11 @@ const CAT_ICON: Record<string, typeof Mountain> = {
 
 interface Props {
   itinerary: ItineraryStop[];
+  notes?: ItineraryNote[];
   onEdit: () => void;
 }
 
-export function ItineraryPanel({ itinerary, onEdit }: Props) {
+export function ItineraryPanel({ itinerary, notes = [], onEdit }: Props) {
   const byDay = useMemo(() => {
     const m = new Map<number, ItineraryStop[]>();
     for (const s of itinerary) {
@@ -44,6 +46,12 @@ export function ItineraryPanel({ itinerary, onEdit }: Props) {
     }
     return [...m.entries()].sort((a, b) => a[0] - b[0]);
   }, [itinerary]);
+
+  const rationaleFor = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const n of notes) m.set(n.day, n.rationale);
+    return m;
+  }, [notes]);
 
   if (itinerary.length === 0) return null;
 
@@ -76,6 +84,12 @@ export function ItineraryPanel({ itinerary, onEdit }: Props) {
             <p className="text-[11px] font-bold uppercase tracking-wide text-brand-600">
               Day {day}
             </p>
+            {rationaleFor.get(day) && (
+              <p className="mt-1 flex gap-1.5 rounded-lg bg-brand-50 px-2.5 py-1.5 text-[11px] leading-snug text-brand-700">
+                <Sparkles className="mt-0.5 h-3 w-3 shrink-0" />
+                {rationaleFor.get(day)}
+              </p>
+            )}
             <div className="mt-1.5 space-y-2">
               {stops.map((s) => {
                 const Icon = CAT_ICON[s.category ?? "other"] ?? MapPin;

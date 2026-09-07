@@ -146,10 +146,111 @@ export interface ItineraryStop {
   blurb?: string | null;
 }
 
+/** Per-day reasoning from the LangGraph itinerary node ("why this day"). */
+export interface ItineraryNote {
+  day: number;
+  rationale: string;
+}
+
 export interface DriveResult {
   distance_km: number;
   duration_hr: number;
   estimated: boolean; // true = straight-line fallback (ORS couldn't route)
+  geometry?: [number, number][]; // downsampled [lat, lon] road path
+}
+
+/** An optional "want food / a rest stop?" prompt the UI shows for own-vehicle trips. */
+export interface DriveOffer {
+  id: string;
+  kind: "food" | "stay";
+  question: string;
+  reason?: string;
+  status: string;
+}
+
+export interface FuelStop {
+  name: string;
+  lat: number;
+  lon: number;
+  brand?: string | null;
+  town?: string;
+  km_from_start?: number;
+  opening_hours?: string | null;
+  price_hint?: string;
+}
+
+// ---- food near the driver's current location ----
+export interface EateryPlace {
+  name: string;
+  kind: string; // dhaba / restaurant / food court / tiffin centre / cafe
+  why: string;
+  where: string; // locality, town — so the UI can say where it is
+  lat: number;
+  lon: number;
+  approx?: boolean;
+}
+export interface FoodResult {
+  kind: "food";
+  town: string | null;
+  radius_km: number;
+  places: EateryPlace[];
+  note: string;
+}
+
+/** Anything we drop on the map along a driving route. */
+export interface RouteMarker {
+  name: string;
+  lat: number;
+  lon: number;
+  kind: "fuel" | "food" | "stay" | "toll";
+  sub?: string;
+}
+
+// ---- toll plazas on the route (own-vehicle, computed during planning) ----
+export interface TollPlaza {
+  name: string;
+  area: string; // town / district the plaza sits in
+  km_from_start: number;
+  car_cost: number; // ₹ for one pass, a 2-axle car
+  cost_estimated: boolean; // true = flat estimate, false = priced in OSM
+  lat: number;
+  lon: number;
+}
+export interface TollInfo {
+  plazas: TollPlaza[];
+  count: number;
+  car_cost_one_way: number;
+  car_cost_round_trip: number;
+  note?: string;
+}
+
+// ---- rest-stop stay ----
+export interface StayOption {
+  name: string;
+  band: "budget" | "mid" | "premium";
+  price_hint: string;
+  why: string;
+  where: string; // locality, town — where the hotel actually is
+  lat: number;
+  lon: number;
+  approx?: boolean;
+}
+export interface StayResult {
+  kind: "stay";
+  town: string | null;
+  radius_km?: number;
+  km_from_start?: number;
+  options: StayOption[];
+  note?: string;
+}
+
+export interface FuelEstimate {
+  fuel_type: string;
+  mileage_kmpl: number;
+  price_per_litre: number;
+  one_way: { litres: number; cost: number };
+  round_trip: { litres: number; cost: number };
+  note: string;
 }
 
 export interface CostItem {
@@ -173,8 +274,12 @@ export interface PlanResult {
   // own-vehicle plans carry these instead:
   mode?: "drive";
   drive?: DriveResult | null;
+  drive_hours?: number | null;
+  tolls?: TollInfo | null; // toll plazas on the route + car-cost estimate
+  offers?: DriveOffer[]; // food / rest-stop prompts for own-vehicle
 
   itinerary?: ItineraryStop[]; // present when the plan was built from picked stops
+  itinerary_notes?: ItineraryNote[]; // the agent's "why this day" reasoning
   costs?: CostBreakdown;
 }
 

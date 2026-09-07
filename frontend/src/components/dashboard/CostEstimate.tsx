@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Fuel, UtensilsCrossed, BedDouble, Wallet } from "lucide-react";
+import { Fuel, UtensilsCrossed, BedDouble, Wallet, TrafficCone } from "lucide-react";
 
 import type { CostBreakdown } from "@/types/api";
 import { Counter } from "@/components/common/Counter";
@@ -8,6 +8,7 @@ import { SectionHeader } from "@/components/common/SectionHeader";
 const ICONS: Record<string, typeof Fuel> = {
   Fuel: Fuel,
   "Fuel (round trip)": Fuel,
+  "Tolls (round trip)": TrafficCone,
   Food: UtensilsCrossed,
   Stay: BedDouble,
 };

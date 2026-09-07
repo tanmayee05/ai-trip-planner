@@ -30,6 +30,26 @@ export function getPlanJob(jobId: string) {
   return api.get<PlanJob>(`/plan/${jobId}`).then((r) => r.data);
 }
 
+// ---- own-vehicle enrichments (fuel stops, food, stay) ----
+export interface EnrichBody {
+  kind: "fuel" | "fuel_stops" | "food" | "stay";
+  distance_km?: number;
+  drive_hours?: number;
+  geometry?: [number, number][];
+  source?: { lat: number; lon: number };
+  destination?: { lat: number; lon: number };
+  fuel?: { mileage_kmpl: number; fuel_type: "petrol" | "diesel" | "cng" };
+  company?: string; // fuel brand
+  preference?: "snacks" | "meals" | "tiffins" | "any";
+  radius_km?: number; // how far from the start to look for food / a hotel
+  note?: string;
+}
+
+export function enrichPlan<T = unknown>(body: EnrichBody) {
+  // food/stay do several throttled Gemini + Nominatim calls — give them room
+  return api.post<T>("/plan/enrich", body, { timeout: 150_000 }).then((r) => r.data);
+}
+
 interface PollOptions {
   intervalMs?: number;
   timeoutMs?: number;

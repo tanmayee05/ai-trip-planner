@@ -79,26 +79,39 @@ Worth remembering — we should label this as "estimated driving time" in the UI
 def get_driving_route_with_geometry(lat1: float, lon1: float, lat2: float, lon2: float) -> dict | None:
     """
     Same as get_driving_route, but also returns the actual path coordinates
-    — needed to place waypoints ALONG the route, not just know start/end.
+    — needed to place waypoints ALONG the route (fuel / food / rest stops).
+    Disk-cached like get_driving_route; returns None on any failure.
     """
+    cache_file = _route_cache_key(lat1, lon1, lat2, lon2)
+    geom_file = cache_file.with_suffix(".geom.json")
+    if geom_file.exists():
+        try:
+            return json.loads(geom_file.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+
     headers = {"Authorization": ORS_API_KEY}
     params = {"start": f"{lon1},{lat1}", "end": f"{lon2},{lat2}"}
-
-    response = requests.get(ORS_URL, headers=headers, params=params, timeout=30)
+    try:
+        response = requests.get(ORS_URL, headers=headers, params=params, timeout=30)
+    except requests.exceptions.RequestException as e:
+        print(f"ORS geometry request failed: {e}")
+        return None
     if response.status_code != 200:
-        print(f"ORS error: {response.status_code} — {response.text}")
+        print(f"ORS error: {response.status_code} — {response.text[:120]}")
         return None
 
     data = response.json()
     feature = data["features"][0]
     summary = feature["properties"]["summary"]
-    coordinates = feature["geometry"]["coordinates"]  # list of [lon, lat] points along the road
-
-    return {
+    out = {
         "distance_km": round(summary["distance"] / 1000, 1),
         "duration_hr": round(summary["duration"] / 3600, 1),
-        "coordinates": coordinates,  # ordered [lon, lat] pairs tracing the actual road
+        "coordinates": feature["geometry"]["coordinates"],  # ordered [lon, lat] along the road
     }
+    _ROUTE_CACHE_DIR.mkdir(exist_ok=True)
+    geom_file.write_text(json.dumps(out), encoding="utf-8")
+    return out
 
 
 if __name__ == "__main__":
