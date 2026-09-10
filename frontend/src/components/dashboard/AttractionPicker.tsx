@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -15,6 +15,7 @@ import {
   ArrowLeft,
   Wand2,
   RotateCcw,
+  Loader2,
 } from "lucide-react";
 
 import { fetchAttractions } from "@/api/attractions";
@@ -147,7 +148,7 @@ export function AttractionPicker({ destination, initialSelected = [], onPlan, on
 
       {/* body */}
       <div className="mt-4 flex-1 overflow-y-auto pr-1">
-        {q.isLoading && <SkeletonGrid />}
+        {q.isLoading && <SkeletonGrid destination={shownName} />}
 
         {q.isError && (
           <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-ink/10 bg-cream/50 px-6 py-8 text-center">
@@ -316,12 +317,39 @@ function PlaceCard({
   );
 }
 
-function SkeletonGrid() {
+/** The shimmer alone is silent, and finding places for somewhere we haven't
+ *  seen before takes ~40s (each place the model suggests is checked against the
+ *  map, one rate-limited lookup at a time). Left unexplained that reads as a
+ *  hang, so the shimmer keeps its place and gets a line saying what's happening
+ *  — the same deal the planning card makes with the traveller. */
+function SkeletonGrid({ destination }: { destination: string }) {
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setSecs((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
   return (
-    <div className="grid gap-2.5 sm:grid-cols-2">
-      {Array.from({ length: 8 }).map((_, i) => (
-        <div key={i} className="h-28 skeleton rounded-2xl" />
-      ))}
+    <div>
+      <div className="mb-3 flex items-center gap-2.5 rounded-2xl bg-cream p-3">
+        <Companion mood="think" size={34} className="shrink-0" />
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 text-xs font-extrabold text-ink">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-500" />
+            Looking up the best places in {destination}…
+          </p>
+          <p className="mt-0.5 text-[11px] font-medium leading-snug text-ink-faint">
+            {secs}s · we check each one against the map so the pins are real. A
+            place we haven't seen before can take up to a minute — instant next time.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        {Array.from({ length: 8 }).map((_, i) => (
+          <div key={i} className="h-28 skeleton rounded-2xl" />
+        ))}
+      </div>
     </div>
   );
 }
