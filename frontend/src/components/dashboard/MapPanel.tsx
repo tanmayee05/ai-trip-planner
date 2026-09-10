@@ -16,10 +16,10 @@ interface Props {
 }
 
 const ROUTE_ICON: Record<RouteMarker["kind"], { bg: string; glyph: string }> = {
-  fuel: { bg: "#FFB93B", glyph: "⛽" },
-  food: { bg: "#FF5C8A", glyph: "🍽️" },
-  stay: { bg: "#37D98E", glyph: "🛏️" },
-  toll: { bg: "#8B5CF6", glyph: "🎫" },
+  fuel: { bg: "#E8A33D", glyph: "⛽" },
+  food: { bg: "#F4784F", glyph: "🍽️" },
+  stay: { bg: "#2EC4B6", glyph: "🛏️" },
+  toll: { bg: "#7A6A9B", glyph: "🎫" },
 };
 
 type LatLng = [number, number];
@@ -30,7 +30,7 @@ function pin(bg: string, label: string, ring = "#fff") {
     html: `<span style="
       display:grid;place-items:center;width:26px;height:26px;border-radius:9999px;
       background:${bg};color:#fff;font:700 11px/1 Inter,system-ui;
-      box-shadow:0 0 0 3px ${ring},0 4px 10px rgba(36,27,46,.35)">${label}</span>`,
+      box-shadow:0 0 0 3px ${ring},0 4px 10px rgba(14,27,44,.35)">${label}</span>`,
     iconSize: [26, 26],
     iconAnchor: [13, 13],
   });
@@ -39,7 +39,7 @@ function pin(bg: string, label: string, ring = "#fff") {
 const youIcon = L.divIcon({
   className: "",
   html: `<span style="display:block;width:16px;height:16px;border-radius:9999px;
-    background:#5B8DEF;box-shadow:0 0 0 4px rgba(91,141,239,.3),0 0 0 8px rgba(91,141,239,.15)"></span>`,
+    background:#2176AE;box-shadow:0 0 0 4px rgba(33,118,174,.3),0 0 0 8px rgba(33,118,174,.15)"></span>`,
   iconSize: [16, 16],
   iconAnchor: [8, 8],
 });
@@ -49,7 +49,7 @@ function routeIcon(kind: RouteMarker["kind"]) {
   return L.divIcon({
     className: "",
     html: `<span style="display:grid;place-items:center;width:20px;height:20px;border-radius:6px;
-      background:${bg};border:2px solid #241C46;font-size:10px">${glyph}</span>`,
+      background:${bg};border:2px solid #0E1B2C;font-size:10px">${glyph}</span>`,
     iconSize: [20, 20],
     iconAnchor: [10, 10],
   });
@@ -137,19 +137,19 @@ export function MapPanel({ source, destination, itinerary = [], routeLine, route
           )}
 
           {source && (
-            <Marker position={[source.lat, source.lon]} icon={pin("#6C4CF1", "A")}>
+            <Marker position={[source.lat, source.lon]} icon={pin("#2176AE", "A")}>
               <Popup>Start · {source.name}</Popup>
             </Marker>
           )}
 
           {destination && stops.length === 0 && (
-            <Marker position={[destination.lat, destination.lon]} icon={pin("#1FCBDE", "B")}>
+            <Marker position={[destination.lat, destination.lon]} icon={pin("#2EC4B6", "B")}>
               <Popup>Destination · {destination.name}</Popup>
             </Marker>
           )}
 
           {itinerary.map((s, i) => (
-            <Marker key={s.name} position={[s.lat, s.lon]} icon={pin("#1FCBDE", String(i + 1))}>
+            <Marker key={s.name} position={[s.lat, s.lon]} icon={pin("#2EC4B6", String(i + 1))}>
               <Popup>
                 <strong>Day {s.day}</strong> · {s.name}
                 {s.blurb && <div style={{ marginTop: 4, maxWidth: 200 }}>{s.blurb}</div>}
@@ -172,22 +172,22 @@ export function MapPanel({ source, destination, itinerary = [], routeLine, route
           ))}
 
           {routeLine && routeLine.length > 1 && (
-            <Polyline positions={routeLine} pathOptions={{ color: "#6C4CF1", weight: 4, opacity: 0.8 }} />
+            <Polyline positions={routeLine} pathOptions={{ color: "#2176AE", weight: 4, opacity: 0.8 }} />
           )}
 
           {stops.length > 1 && (
-            <Polyline positions={stops} pathOptions={{ color: "#6C4CF1", weight: 3, dashArray: "6 8" }} />
+            <Polyline positions={stops} pathOptions={{ color: "#2176AE", weight: 3, dashArray: "6 8" }} />
           )}
           {source && stops.length > 0 && (
             <Polyline
               positions={[[source.lat, source.lon], stops[0]]}
-              pathOptions={{ color: "#9C96BC", weight: 2, dashArray: "2 8" }}
+              pathOptions={{ color: "#8698AC", weight: 2, dashArray: "2 8" }}
             />
           )}
           {source && destination && stops.length === 0 && (
             <Polyline
               positions={[[source.lat, source.lon], [destination.lat, destination.lon]]}
-              pathOptions={{ color: "#9C96BC", weight: 2, dashArray: "2 8" }}
+              pathOptions={{ color: "#8698AC", weight: 2, dashArray: "2 8" }}
             />
           )}
         </MapContainer>

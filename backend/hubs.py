@@ -11,6 +11,7 @@ is the next step and lives elsewhere.
 import hashlib
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -72,6 +73,56 @@ def _overpass_cache_path(query: str) -> Path:
 # --------------------------------------------------------------------------
 # Overpass (OpenStreetMap) helpers
 # --------------------------------------------------------------------------
+# Overpass returns [] both for "nothing is there" and for "every mirror is
+# down". Callers that report findings to a human need to tell those apart —
+# "no airport near the destination" is a confident, wrong statement to make
+# when we simply couldn't ask. This set is written by _post_overpass and read
+# through the helpers below.
+_LAST_OVERPASS_FAILED: set[bool] = set()
+
+# --- circuit breaker -------------------------------------------------------
+# Exhausting every mirror is EXPENSIVE: a read timeout costs 45s per mirror,
+# so one dead-Overpass query burns ~105-135s before returning []. A plan makes
+# several queries, and when the mirrors are unhealthy they all fail the same
+# way — so without a breaker a single bad Overpass spell can add ten minutes
+# to a plan and push it past the point where the client gives up waiting.
+#
+# After a total failure we therefore stop calling out for a cooldown and let
+# the affected sections degrade immediately (they already report "couldn't
+# check" honestly). One success closes the breaker again, and once the cooldown
+# elapses the next query is allowed through to test the water.
+_OVERPASS_COOLDOWN_S = 90
+_breaker_lock = threading.Lock()
+_breaker_open_until = 0.0
+
+
+def _breaker_is_open() -> bool:
+    with _breaker_lock:
+        return time.monotonic() < _breaker_open_until
+
+
+def _breaker_trip() -> None:
+    global _breaker_open_until
+    with _breaker_lock:
+        _breaker_open_until = time.monotonic() + _OVERPASS_COOLDOWN_S
+
+
+def _breaker_reset() -> None:
+    global _breaker_open_until
+    with _breaker_lock:
+        _breaker_open_until = 0.0
+
+
+def overpass_failures_reset() -> None:
+    """Start a fresh 'did Overpass work?' window."""
+    _LAST_OVERPASS_FAILED.clear()
+
+
+def overpass_failed_since_reset() -> bool:
+    """True if any Overpass query since the last reset exhausted every mirror."""
+    return bool(_LAST_OVERPASS_FAILED)
+
+
 def _post_overpass(query: str) -> list[dict]:
     """POST one Overpass query, trying each mirror and retrying on 429/504.
     Answers are cached on disk; prints WHY it failed instead of returning []
@@ -82,6 +133,12 @@ def _post_overpass(query: str) -> list[dict]:
             return json.loads(cache_file.read_text(encoding="utf-8"))
         except ValueError:
             pass  # corrupt cache entry — fall through and re-fetch
+
+    # a cached answer is always served (above); only NEW queries are skipped
+    if _breaker_is_open():
+        print("  [overpass] skipping — every mirror failed recently (cooling down)")
+        _LAST_OVERPASS_FAILED.add(True)
+        return []
 
     for url in OVERPASS_MIRRORS:
         for attempt in range(2):
@@ -100,6 +157,7 @@ def _post_overpass(query: str) -> list[dict]:
                     break
                 _OVERPASS_CACHE_DIR.mkdir(exist_ok=True)
                 cache_file.write_text(json.dumps(elements), encoding="utf-8")
+                _breaker_reset()          # Overpass is answering again
                 return elements
             if resp.status_code in (429, 504):
                 wait = 5 * (attempt + 1)
@@ -109,6 +167,8 @@ def _post_overpass(query: str) -> list[dict]:
             print(f"  [overpass] {url} returned HTTP {resp.status_code}")
             break
     print("  [overpass] all mirrors failed for this query")
+    _LAST_OVERPASS_FAILED.add(True)
+    _breaker_trip()
     return []
 
 

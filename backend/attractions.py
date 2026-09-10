@@ -18,7 +18,10 @@ pre-select.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
+from collections import Counter
+from difflib import SequenceMatcher
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -79,24 +82,72 @@ def _cache_path(destination: str) -> Path:
     return _CACHE_DIR / f"{hashlib.sha1(key.encode()).hexdigest()[:16]}.json"
 
 
-def get_attractions(destination: str) -> list[dict]:
+def _similar(a: str, b: str) -> float:
+    """Fuzzy match on letters only, so 'thiruvunnnamalai' scores high against
+    'Tiruvannamalai' but 'zzqqxx nowhere' scores near zero against 'Jaipur'."""
+    norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())  # noqa: E731
+    return SequenceMatcher(None, norm(a), norm(b)).ratio()
+
+
+# below this, the town Gemini named is unrelated to what the user typed —
+# it fell back to somewhere famous, and we must not pass that off as a match
+_SPELLING_MATCH = 0.55
+
+
+def _resolve_anchor(destination: str, result: _AttractionList) -> tuple[dict | None, str]:
+    """Centre point + display label for the destination.
+
+    A misspelling like "thiruvunnnamalai" won't geocode at all, but Gemini
+    still understands it — so we fall back to the town its results keep
+    naming. That both rescues the distance maths and hands us the correct
+    spelling to show the user.
     """
-    Places for `destination`, each as:
+    hit = geocode(destination)
+    if hit:
+        return hit, destination
+
+    towns = Counter(p.nearest_town.strip() for p in result.places if p.nearest_town.strip())
+    for town, _ in towns.most_common(3):
+        if _similar(destination, town) < _SPELLING_MATCH:
+            continue
+        hit = geocode(f"{town}, India")
+        if hit:
+            return hit, town
+    return None, destination
+
+
+def get_attractions(destination: str) -> dict:
+    """
+    Places for `destination` as {"destination": <resolved name>, "places": [...]},
+    each place being:
       {name, town, category, blurb, lat, lon, scope, distance_km, approx_hours}
     scope is "in" or "nearby". Cached on disk per destination.
     """
     cache_file = _cache_path(destination)
     if cache_file.exists():
         try:
-            return json.loads(cache_file.read_text(encoding="utf-8"))
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            # older caches stored a bare list
+            if isinstance(cached, list):
+                return {"destination": destination, "places": cached}
+            return cached
         except ValueError:
             pass
 
-    anchor = geocode(destination)  # centre of the destination, for distances
-    result: _AttractionList = _extractor.invoke([
-        ("system", _SYSTEM),
-        ("human", _PROMPT.format(destination=destination)),
-    ])
+    try:
+        result: _AttractionList = _extractor.invoke([
+            ("system", _SYSTEM),
+            ("human", _PROMPT.format(destination=destination)),
+        ])
+    except Exception:  # noqa: BLE001 — LLM/network failure: report "none found"
+        return {"destination": destination, "places": []}
+
+    # anchor AFTER the LLM call, so a misspelling can be recovered from it
+    anchor, label = _resolve_anchor(destination, result)
+    if anchor is None:
+        # nothing we can ground the destination to — better an honest "not
+        # found" than a confident list of places from somewhere else entirely
+        return {"destination": destination, "places": []}
 
     places: list[dict] = []
     seen: set[str] = set()
@@ -141,14 +192,15 @@ def get_attractions(destination: str) -> list[dict]:
     # in-destination first, then nearby by distance
     places.sort(key=lambda x: (x["scope"] != "in", x["distance_km"] or 0))
 
+    out = {"destination": label, "places": places}
     if places:
         _CACHE_DIR.mkdir(exist_ok=True)
-        cache_file.write_text(json.dumps(places), encoding="utf-8")
-    return places
+        cache_file.write_text(json.dumps(out), encoding="utf-8")
+    return out
 
 
 if __name__ == "__main__":
-    for a in get_attractions("Coorg"):
+    for a in get_attractions("Coorg")["places"]:
         tag = a["scope"].upper().ljust(6)
         hrs = f"~{a['approx_hours']}h" if a["approx_hours"] else ""
         print(f"{tag} {a['category']:12} | {a['name']:26} ({a['town']}) {hrs}")

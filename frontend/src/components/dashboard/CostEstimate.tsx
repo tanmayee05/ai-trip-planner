@@ -14,17 +14,33 @@ const ICONS: Record<string, typeof Fuel> = {
 };
 
 export function CostEstimate({ costs }: { costs: CostBreakdown }) {
+  // Read defensively. This panel is fed from a plan that may still be building
+  // (or from a trip saved by an older version), and reaching straight into
+  // `costs.assumptions.people` on a half-filled object throws — which unmounts
+  // the whole React tree and leaves the user staring at a blank page.
+  const items = costs?.items ?? [];
+  const people = costs?.assumptions?.people;
+  const days = costs?.assumptions?.days;
+  const subtitle = [
+    people ? `${people} ${people > 1 ? "people" : "person"}` : null,
+    days ? `${days} ${days > 1 ? "days" : "day"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  if (items.length === 0) return null;
+
   return (
     <div className="card card-hover card-sunny p-5 sm:p-6">
       <SectionHeader
         emoji="💰"
         tone="sunny"
         title="Rough cost"
-        subtitle={`for ${costs.assumptions.people} ${costs.assumptions.people > 1 ? "people" : "person"} · ${costs.assumptions.days} ${costs.assumptions.days > 1 ? "days" : "day"}`}
+        subtitle={subtitle ? `for ${subtitle}` : undefined}
       />
 
       <ul className="mt-1 space-y-2">
-        {costs.items.map((it, i) => {
+        {items.map((it, i) => {
           const Icon = ICONS[it.label] ?? Wallet;
           return (
             <motion.li
@@ -58,14 +74,14 @@ export function CostEstimate({ costs }: { costs: CostBreakdown }) {
       >
         <span className="text-sm font-semibold text-brand-700">Estimated total</span>
         <Counter
-          value={costs.total}
+          value={costs?.total ?? 0}
           prefix="₹"
           duration={1100}
           className="font-display text-lg font-extrabold text-brand-700"
         />
       </motion.div>
 
-      <p className="mt-2 text-[11px] leading-snug text-ink-faint">{costs.note}</p>
+      <p className="mt-2 text-[11px] leading-snug text-ink-faint">{costs?.note}</p>
     </div>
   );
 }

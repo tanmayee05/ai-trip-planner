@@ -18,6 +18,11 @@ interface Props {
 export function TripRequestForm({ draft, patch, onNext, canNext, busy = false }: Props) {
   const [touched, setTouched] = useState(false);
 
+  const days = parseInt(draft.num_days, 10);
+  const people = parseInt(draft.num_people, 10);
+  const daysBad = !Number.isFinite(days) || days < 1;
+  const peopleBad = !Number.isFinite(people) || people < 1;
+
   function swap() {
     patch({ source: draft.destination, destination: draft.source });
   }
@@ -32,6 +37,7 @@ export function TripRequestForm({ draft, patch, onNext, canNext, busy = false }:
     <div>
       <p className="text-xs text-ink-faint">
         Place names work best with a state, e.g. &ldquo;Rebala, Andhra Pradesh&rdquo;.
+        Fields marked <span className="font-bold text-brand-500">*</span> are required.
       </p>
 
       <form onSubmit={submit}>
@@ -82,26 +88,30 @@ export function TripRequestForm({ draft, patch, onNext, canNext, busy = false }:
             />
           </div>
           <div className="w-16">
-            <label className="label">Days</label>
+            <label className="label">
+              Days <span className="text-brand-500">*</span>
+            </label>
             <input
               type="number"
               min={1}
               max={60}
-              className="input px-2"
-              placeholder="–"
+              className={cn("input px-2", touched && daysBad && "ring-2 ring-brand-400")}
+              placeholder="2"
               value={draft.num_days}
               onChange={(e) => patch({ num_days: e.target.value })}
               disabled={busy}
             />
           </div>
           <div className="w-16">
-            <label className="label">People</label>
+            <label className="label">
+              People <span className="text-brand-500">*</span>
+            </label>
             <input
               type="number"
               min={1}
               max={30}
-              className="input px-2"
-              placeholder="–"
+              className={cn("input px-2", touched && peopleBad && "ring-2 ring-brand-400")}
+              placeholder="2"
               value={draft.num_people}
               onChange={(e) => patch({ num_people: e.target.value })}
               disabled={busy}
@@ -111,7 +121,7 @@ export function TripRequestForm({ draft, patch, onNext, canNext, busy = false }:
 
         <div className="mt-3">
           <span className="label">How are you travelling?</span>
-          <div className="grid grid-cols-2 gap-1 rounded-2xl border-2 border-ink/10 bg-cream p-1">
+          <div className="grid grid-cols-2 gap-1 rounded-2xl border border-ink/10 bg-cream p-1">
             {(
               [
                 ["public_transport", "Public transport", Bus],
@@ -144,10 +154,17 @@ export function TripRequestForm({ draft, patch, onNext, canNext, busy = false }:
           </div>
         </div>
 
+        {touched && !canNext && (
+          <p className="mt-3 text-[11px] font-semibold text-brand-600">
+            Fill in every required field — including how many days and how many
+            people — before choosing stops.
+          </p>
+        )}
+
         <motion.button
           type="submit"
           className="btn-primary mt-5 w-full"
-          disabled={!canNext || busy}
+          disabled={busy}
           whileTap={{ scale: 0.98 }}
         >
           Next: choose stops

@@ -9,12 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 import sqlite3
 
-from trip_slots import TripSlots, next_question
+from trip_slots import TripSlots, next_question, PLANNER_FIELDS
 from slot_extraction import update_slots
 from geocoding import geocode
 from attractions import get_attractions
+from chat_reply import answer_question, looks_like_question, wants_change
 from itinerary import region_center
-from agent import run_trip_plan   # the LangGraph trip-planning agent
+from agent import run_trip_plan, plan_stages   # the LangGraph trip-planning agent
 from enrichments import estimate_fuel, fuel_stops_along_route, enrich_food, enrich_stay
 """
 init_db(): Create database/tables if needed
@@ -133,13 +134,20 @@ class AttractionsResponse(BaseModel):
 
 @app.post("/attractions", response_model=AttractionsResponse)
 def attractions(req: AttractionsRequest):
-    places = get_attractions(req.destination)
+    data = get_attractions(req.destination)
+    places = data["places"]
     if not places:
         raise HTTPException(
             status_code=422,
-            detail=f"Couldn't find well-known places for '{req.destination}'. Try a broader region name.",
+            detail=(
+                f"Couldn't find places for '{req.destination}'. Check the spelling, "
+                f"add the state (e.g. 'Tiruvannamalai, Tamil Nadu'), or try again — "
+                f"the map lookup is sometimes rate-limited."
+            ),
         )
-    return AttractionsResponse(destination=req.destination, places=places)
+    # `data["destination"]` is the resolved spelling — it can differ from what
+    # the user typed when we recovered from a misspelling.
+    return AttractionsResponse(destination=data["destination"], places=places)
 
 
 # ==========================================================================
@@ -162,6 +170,7 @@ class PlanRequest(BaseModel):
     num_people: int | None = Field(default=None, ge=1, le=30)
     travel_mode: Literal["public_transport", "own_vehicle"] = "public_transport"
     stops: list[PlanStop] = []          # picked attractions; empty = plain point-to-point
+    chat_session_id: str | None = None  # links the saved trip back to its chat transcript, if any
 
 
 class GeoPoint(BaseModel):
@@ -189,6 +198,11 @@ class PlanJobStarted(BaseModel):
     itinerary: list[ItineraryStop] = []   # ordered day-by-day plan (empty for point-to-point)
 
 
+class PlanStage(BaseModel):
+    key: str                            # "itinerary" | "transport" | ...
+    label: str                          # what to show the traveller
+
+
 class PlanJobStatus(BaseModel):
     job_id: str
     state: str                          # "running" | "done" | "error"
@@ -199,6 +213,10 @@ class PlanJobStatus(BaseModel):
     trip_id: int | None = None          # set on "done" if the user was logged in
     result: dict | None = None          # the full check_all_modes() output on "done"
     error: str | None = None
+    # --- live progress, so the UI can show the plan being built ---
+    stages: list[PlanStage] = []        # every stage THIS trip will go through
+    stages_done: list[str] = []         # the keys finished so far
+    partial: dict | None = None         # the plan as it stands, same shape as `result`
 
 
 # in-memory job table. Fine for a single-process dev server; a job is lost on
@@ -220,6 +238,14 @@ def _run_plan_job(job_id: str, req: PlanRequest, src: dict, dst: dict, user_id: 
     """Background worker: hand the trip to the LangGraph agent, then persist."""
     job = _PLAN_JOBS[job_id]
     travel_date = req.travel_date.isoformat()
+
+    def on_progress(partial: dict, done: list[str]) -> None:
+        # Plain dict assignment: the job table is only ever read by the poll
+        # endpoint, and a dict write is atomic under the GIL, so no lock is
+        # needed for the reader to see a consistent snapshot.
+        job["partial"] = partial
+        job["stages_done"] = done
+
     try:
         result = run_trip_plan(
             source=req.source,
@@ -231,6 +257,7 @@ def _run_plan_job(job_id: str, req: PlanRequest, src: dict, dst: dict, user_id: 
             source_geo=src,
             dest_geo=dst,
             stops=job["stops"],      # the agent reasons the day-by-day plan itself
+            on_progress=on_progress,  # stream the plan out as it comes together
         )
 
         if user_id is not None:  # remember it for logged-in users (History)
@@ -242,14 +269,21 @@ def _run_plan_job(job_id: str, req: PlanRequest, src: dict, dst: dict, user_id: 
                     "travel_date": travel_date,
                     "source_lat": src["lat"], "source_lon": src["lon"],
                     "dest_lat": dst["lat"], "dest_lon": dst["lon"],
+                    "chat_session_id": req.chat_session_id,
                 },
                 result=result,
             )
             job["trip_id"] = saved["id"]
         job["result"] = result
         job["state"] = "done"
-    except Exception:
-        job["error"] = traceback.format_exc(limit=3)
+    except Exception as e:
+        # Every stage of the agent degrades on its own now, so reaching here
+        # means something genuinely unexpected broke. Keep the traceback in
+        # the log for us, but hand the client one readable sentence — the
+        # frontend used to show a bare "Could not plan this trip." because
+        # there was nothing better in the payload.
+        print(traceback.format_exc())
+        job["error"] = f"{type(e).__name__}: {e}"[:300]
         job["state"] = "error"
     job["finished_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -279,6 +313,11 @@ def start_plan(req: PlanRequest, user_id: int | None = Depends(get_optional_user
         "source": src_pt, "destination": dst_pt, "travel_date": req.travel_date.isoformat(),
         "stops": stops,              # the agent turns these into a day-by-day itinerary
         "started_at": datetime.now(timezone.utc).isoformat(),
+        # progress scaffolding — the stage list is known before any work starts,
+        # so the UI can draw the whole checklist on the very first poll
+        "stages": plan_stages(req.travel_mode, bool(stops)),
+        "stages_done": [],
+        "partial": None,
     }
 
     threading.Thread(
@@ -299,12 +338,17 @@ def plan_status(job_id: str):
     job = _PLAN_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="No such plan job (it may have expired on a server restart)")
-    result = job["result"] or {}
+    # while running, the itinerary comes from the partial so the UI can show
+    # the day-by-day plan the moment it exists rather than at the very end
+    result = job["result"] or job.get("partial") or {}
     return PlanJobStatus(
         job_id=job_id, state=job["state"],
         source=job["source"], destination=job["destination"], travel_date=job["travel_date"],
         itinerary=result.get("itinerary", []),
         trip_id=job["trip_id"], result=job["result"], error=job["error"],
+        stages=[PlanStage(**s) for s in job.get("stages", [])],
+        stages_done=job.get("stages_done", []),
+        partial=job.get("partial"),
     )
 
 
@@ -405,6 +449,10 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str | None = None
     message: str
+    # What the UI already has in the shared form draft. Without this the chat
+    # session starts blank and re-asks for a source the user can plainly see
+    # filled in on screen.
+    known: dict | None = None
 
 
 class ChatResponse(BaseModel):
@@ -430,17 +478,49 @@ def chat(req: ChatRequest):
         last_question = existing["last_question"]
         messages = list(existing["messages"])
 
-    slots = update_slots(slots, req.message, last_question)
-    question = next_question(slots)
+    # Fold in what the form already knows BEFORE extracting from the message.
+    # The draft is the shared source of truth across form and chat, so its
+    # values win; anything it leaves blank keeps whatever the session learned.
+    supplied = {
+        k: v
+        for k, v in (req.known or {}).items()
+        if k in TripSlots.model_fields and v not in (None, "")
+    }
+    if supplied:
+        slots = slots.model_copy(update=supplied)
 
-    if question is None:
-        reply = "Great, I have everything I need!"
-        ready = True
-        last_question = None
-    else:
-        reply = question
-        last_question = question
-        ready = False
+    asking = looks_like_question(req.message)
+
+    # Everything we already know going in — from the form OR learned earlier in
+    # this conversation. A question may ADD to this, but must never overwrite
+    # it: "best hotels in Vizag?" asked about a Kerala trip must leave the
+    # destination as Kerala. Statements, and anything phrased as an explicit
+    # change, still update slots normally.
+    established = slots.model_dump(exclude_none=True)
+
+    slots = update_slots(slots, req.message, last_question)
+
+    if asking and established and not wants_change(req.message):
+        slots = slots.model_copy(update=established)
+
+    # the web app collects mode-specific details with its own controls, and
+    # never uses budget/end_date — so don't interrogate for them here
+    question = next_question(slots, PLANNER_FIELDS, conditional=False)
+    ready = question is None
+
+    # If the traveller actually ASKED something, answer it — then fold the next
+    # slot question in as a follow-up. Without this the chat just talks over
+    # them with the next form field.
+    reply = None
+    if asking:
+        reply = answer_question(req.message, slots, question)
+
+    if reply is None:
+        reply = question if question else "Great, I have everything I need!"
+
+    # the pending slot question stays the extraction context for the next turn,
+    # even when we wrapped it inside a longer answer
+    last_question = question
 
     messages.append({"role": "user", "text": req.message})
     messages.append({"role": "assistant", "text": reply})
@@ -464,7 +544,9 @@ def chat_history(session_id: str):
         session_id=session_id,
         reply="",  # nothing new this call
         slots=existing["slots"].model_dump(),
-        ready_to_plan=next_question(existing["slots"]) is None,
+        # same checklist the live /chat turn uses, so a rehydrated session
+        # doesn't claim it still needs a budget/end_date the app never asks for
+        ready_to_plan=next_question(existing["slots"], PLANNER_FIELDS, conditional=False) is None,
         messages=[ChatMessage(**m) for m in existing["messages"]],
     )
 

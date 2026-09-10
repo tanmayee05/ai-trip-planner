@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { X, History as HistoryIcon, Trash2, MapPin, RotateCcw, Loader2 } from "lucide-react";
+import { X, History as HistoryIcon, Trash2, MapPin, RotateCcw, Loader2, SquarePen } from "lucide-react";
 import toast from "react-hot-toast";
 
 import { listTrips, getTrip, deleteTrip } from "@/api/trips";
@@ -14,9 +14,11 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onOpenTrip: (trip: TripDetail) => void;
+  /** wipe the current plan and jump back to a blank form — the way in from History */
+  onNewTrip: () => void;
 }
 
-export function HistoryDrawer({ open, onClose, onOpenTrip }: Props) {
+export function HistoryDrawer({ open, onClose, onOpenTrip, onNewTrip }: Props) {
   const { status } = useAuth();
   const qc = useQueryClient();
 
@@ -49,31 +51,45 @@ export function HistoryDrawer({ open, onClose, onOpenTrip }: Props) {
       {open && (
         <>
           <motion.div
-            className="fixed inset-0 z-50 bg-ink/30 backdrop-blur-[2px]"
+            className="fixed inset-0 z-[60] bg-ink/40 backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
           />
           <motion.aside
-            className="fixed inset-y-0 right-0 z-50 flex w-full max-w-sm flex-col bg-cream shadow-lift"
+            className="fixed inset-y-0 right-0 z-[61] flex w-full max-w-sm flex-col border-l border-ink/10 bg-cream shadow-lift"
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
             transition={{ type: "spring", stiffness: 320, damping: 34 }}
           >
-            <header className="flex items-center justify-between border-b border-ink/5 px-5 py-4">
+            <header className="flex items-center justify-between border-b border-ink/[0.07] bg-paper/60 px-5 py-4 backdrop-blur-md">
               <div className="flex items-center gap-2">
                 <HistoryIcon className="h-5 w-5 text-brand-500" />
                 <h2 className="font-display text-xl font-extrabold">Your trips</h2>
               </div>
-              <button
-                onClick={onClose}
-                className="grid h-8 w-8 place-items-center rounded-full text-ink-soft transition hover:bg-ink/5 hover:text-ink"
-                aria-label="Close history"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => {
+                    onNewTrip();
+                    onClose();
+                  }}
+                  className="flex items-center gap-1.5 rounded-full border border-ink/10 bg-paper px-2.5 py-1.5 text-xs font-bold text-ink-soft transition hover:border-brand-300 hover:text-brand-600"
+                  aria-label="Start a new trip"
+                  title="Start a new trip"
+                >
+                  <SquarePen className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">New trip</span>
+                </button>
+                <button
+                  onClick={onClose}
+                  className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-ink-soft transition hover:bg-ink/5 hover:text-ink"
+                  aria-label="Close history"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
             </header>
 
             <div className="flex-1 overflow-y-auto p-4">

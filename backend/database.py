@@ -70,6 +70,10 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
+    # migrate older DBs that predate linking a trip back to its chat transcript
+    _trip_cols = {r[1] for r in conn.execute("PRAGMA table_info(trips)")}
+    if "chat_session_id" not in _trip_cols:
+        conn.execute("ALTER TABLE trips ADD COLUMN chat_session_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trips_user ON trips(user_id)")
 
     conn.commit()
@@ -163,21 +167,26 @@ def get_user_by_id(user_id: int) -> dict | None:
 def save_trip(user_id: int, meta: dict, result: dict) -> dict:
     """
     meta  = {title, source, destination, travel_date,
-             source_lat, source_lon, dest_lat, dest_lon}
+             source_lat, source_lon, dest_lat, dest_lon, chat_session_id}
     result = the dict returned by connectivity.check_all_modes()
+
+    `chat_session_id` links the trip back to whatever chat conversation
+    planned it (if any), so reopening it from History restores that
+    transcript instead of starting a blank chat — the same way the form
+    fields are restored.
     """
     conn = get_connection()
     cur = conn.execute("""
         INSERT INTO trips (user_id, title, source, destination, travel_date,
                            source_lat, source_lon, dest_lat, dest_lon,
-                           result_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           result_json, created_at, chat_session_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         user_id, meta.get("title"), meta.get("source"), meta.get("destination"),
         meta.get("travel_date"),
         meta.get("source_lat"), meta.get("source_lon"),
         meta.get("dest_lat"), meta.get("dest_lon"),
-        json.dumps(result), _now_iso(),
+        json.dumps(result), _now_iso(), meta.get("chat_session_id"),
     ))
     conn.commit()
     trip_id = cur.lastrowid
@@ -205,7 +214,8 @@ def get_trip(user_id: int, trip_id: int) -> dict | None:
     conn = get_connection()
     row = conn.execute("""
         SELECT id, title, source, destination, travel_date,
-               source_lat, source_lon, dest_lat, dest_lon, result_json, created_at
+               source_lat, source_lon, dest_lat, dest_lon, result_json, created_at,
+               chat_session_id
         FROM trips WHERE id = ? AND user_id = ?
     """, (trip_id, user_id)).fetchone()
     conn.close()
@@ -218,6 +228,7 @@ def get_trip(user_id: int, trip_id: int) -> dict | None:
         "dest_lat": row[7], "dest_lon": row[8],
         "result": json.loads(row[9]),
         "created_at": row[10],
+        "chat_session_id": row[11],
     }
 
 

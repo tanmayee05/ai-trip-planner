@@ -28,8 +28,8 @@ export function Companion({ size = 72, mood = "idle", className }: Props) {
         <defs>
           <linearGradient id="pip-body" x1="0" y1="0" x2="1" y2="1">
             <stop offset="0%" stopColor="#A88DFF" />
-            <stop offset="55%" stopColor="#6C4CF1" />
-            <stop offset="100%" stopColor="#4728B8" />
+            <stop offset="55%" stopColor="#4C97CE" />
+            <stop offset="100%" stopColor="#12486D" />
           </linearGradient>
         </defs>
 
@@ -37,7 +37,7 @@ export function Companion({ size = 72, mood = "idle", className }: Props) {
         <path
           d="M6 78 Q 24 70 30 54"
           fill="none"
-          stroke="#B57BFF"
+          stroke="#2EC4B6"
           strokeWidth="3"
           strokeLinecap="round"
           strokeDasharray="2 8"
@@ -47,31 +47,31 @@ export function Companion({ size = 72, mood = "idle", className }: Props) {
         <path
           d="M30 50 L82 20 L64 78 L52 58 Z"
           fill="url(#pip-body)"
-          stroke="#241C46"
+          stroke="#0E1B2C"
           strokeWidth="3"
           strokeLinejoin="round"
         />
-        <path d="M52 58 L82 20" fill="none" stroke="#241C46" strokeWidth="2.5" opacity="0.5" />
+        <path d="M52 58 L82 20" fill="none" stroke="#0E1B2C" strokeWidth="2.5" opacity="0.5" />
 
         {/* face */}
         {sleeping ? (
           <>
-            <path d="M58 44 q4 4 8 0" fill="none" stroke="#241C46" strokeWidth="3" strokeLinecap="round" />
-            <path d="M68 44 q4 4 8 0" fill="none" stroke="#241C46" strokeWidth="3" strokeLinecap="round" />
-            <text x="78" y="26" fontSize="12" fill="#241C46" fontWeight="700">z</text>
+            <path d="M58 44 q4 4 8 0" fill="none" stroke="#0E1B2C" strokeWidth="3" strokeLinecap="round" />
+            <path d="M68 44 q4 4 8 0" fill="none" stroke="#0E1B2C" strokeWidth="3" strokeLinecap="round" />
+            <text x="78" y="26" fontSize="12" fill="#0E1B2C" fontWeight="700">z</text>
           </>
         ) : (
           <>
             <motion.g style={{ transformOrigin: "62px 45px" }} animate={{ scaleY: [1, 1, 0.1, 1] }} transition={{ duration: 3.4, repeat: Infinity, times: [0, 0.9, 0.94, 1] }}>
-              <circle cx="62" cy="45" r="3.4" fill="#241C46" />
+              <circle cx="62" cy="45" r="3.4" fill="#0E1B2C" />
             </motion.g>
             <motion.g style={{ transformOrigin: "73px 42px" }} animate={{ scaleY: [1, 1, 0.1, 1] }} transition={{ duration: 3.4, repeat: Infinity, times: [0, 0.9, 0.94, 1] }}>
-              <circle cx="73" cy="42" r="3.4" fill="#241C46" />
+              <circle cx="73" cy="42" r="3.4" fill="#0E1B2C" />
             </motion.g>
             <path
               d={mood === "cheer" ? "M60 52 q8 9 16 -2" : "M61 52 q7 5 13 -1"}
               fill="none"
-              stroke="#241C46"
+              stroke="#0E1B2C"
               strokeWidth="3"
               strokeLinecap="round"
             />

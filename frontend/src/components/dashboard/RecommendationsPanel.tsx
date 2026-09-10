@@ -17,9 +17,18 @@ const TABS: { mode: TransportMode; label: string; icon: typeof TrainFront }[] = 
 interface Props {
   result: PlanResult | null;
   routeLabel?: string; // "Rebala → Madikeri"
+  emoji?: string;
+  title?: string;
+  emptyText?: string;
 }
 
-export function RecommendationsPanel({ result, routeLabel }: Props) {
+export function RecommendationsPanel({
+  result,
+  routeLabel,
+  emoji = "🚊",
+  title = "How to get there",
+  emptyText,
+}: Props) {
   const [active, setActive] = useState<TransportMode>("train");
 
   // when a fresh result lands, jump to the first mode that has a recommendation
@@ -32,19 +41,19 @@ export function RecommendationsPanel({ result, routeLabel }: Props) {
   return (
     <div className="card card-hover p-5 sm:p-6">
       <SectionHeader
-        emoji="🚊"
+        emoji={emoji}
         tone="brand"
-        title="How to get there"
+        title={title}
         right={
           routeLabel ? (
-            <span className="truncate rounded-full border-2 border-ink/10 bg-cream px-2.5 py-1 text-xs font-bold text-ink-soft">
+            <span className="truncate rounded-full border border-ink/10 bg-cream px-2.5 py-1 text-xs font-bold text-ink-soft">
               {routeLabel}
             </span>
           ) : undefined
         }
       />
 
-      <div className="flex gap-1 rounded-2xl border-2 border-ink/10 bg-cream p-1">
+      <div className="flex gap-1 rounded-2xl border border-ink/10 bg-cream p-1">
         {TABS.map(({ mode, label, icon: Icon }) => {
           const confirmed = !!result?.[mode]?.recommended;
           return (
@@ -80,9 +89,13 @@ export function RecommendationsPanel({ result, routeLabel }: Props) {
           <Companion mood="idle" size={58} />
           <p className="text-sm font-semibold text-ink">No plan yet</p>
           <p className="max-w-xs text-xs text-ink-faint">
-            Fill in the trip form (or describe it in chat) and hit{" "}
-            <strong>Plan my trip</strong>. Confirmed trains, buses and flights
-            for your date show up here.
+            {emptyText ?? (
+              <>
+                Fill in the trip form (or describe it in chat) and hit{" "}
+                <strong>Plan my trip</strong>. Confirmed trains, buses and flights
+                for your date show up here.
+              </>
+            )}
           </p>
         </div>
       )}

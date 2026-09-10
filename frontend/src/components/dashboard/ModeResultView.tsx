@@ -11,6 +11,7 @@ import {
   ChevronDown,
   CircleCheck,
   CircleAlert,
+  CloudOff,
 } from "lucide-react";
 
 import type { HubOption, ModeResult, TransportMode } from "@/types/api";
@@ -31,7 +32,7 @@ function tierChip(tier?: 1 | 2 | 3, state?: string | null) {
     <span
       className={cn(
         "rounded-full px-2 py-0.5 text-[11px] font-semibold",
-        tier <= 2 ? "bg-teal-100 text-teal-700" : "bg-sunny/25 text-[#8a5a00]",
+        tier <= 2 ? "bg-teal-100 text-teal-700" : "bg-sunny/25 text-[#8A5A12]",
       )}
     >
       {state ? `${state} · ${label}` : label}
@@ -193,10 +194,24 @@ export function ModeResultView({ mode, data }: { mode: TransportMode; data: Mode
         </div>
       )}
 
-      {/* note (bus always has one; other modes when nothing/partial) */}
+      {/* note (bus always has one; other modes when nothing/partial).
+          "We couldn't check" gets its own neutral treatment — showing it in
+          the same amber as "nothing runs that day" would tell the traveller
+          this mode is ruled out, when in fact it's simply unknown. */}
       {data.note && (
-        <div className="mt-3 flex gap-2 rounded-xl bg-sunny/15 p-3 text-xs text-[#8a5a00]">
-          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+        <div
+          className={cn(
+            "mt-3 flex gap-2 rounded-xl p-3 text-xs",
+            data.data_unavailable
+              ? "bg-ink/[0.04] text-ink-soft ring-1 ring-inset ring-ink/10"
+              : "bg-sunny/15 text-[#8A5A12]",
+          )}
+        >
+          {data.data_unavailable ? (
+            <CloudOff className="mt-0.5 h-4 w-4 shrink-0" />
+          ) : (
+            <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          )}
           <p>{data.note}</p>
         </div>
       )}

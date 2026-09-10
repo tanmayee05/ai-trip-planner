@@ -6,7 +6,10 @@ then by distance within a tier.
 """
 from datetime import datetime
 
-from hubs import get_nearby_place_candidates, list_nearby_train_stations, list_nearby_bus_or_flight
+from hubs import (
+    get_nearby_place_candidates, list_nearby_train_stations, list_nearby_bus_or_flight,
+    overpass_failures_reset, overpass_failed_since_reset,
+)
 from geocoding import geocode, reverse_geocode
 from distance import straight_line_distance_km
 from routing import get_driving_route
@@ -235,6 +238,7 @@ def find_destination_hubs(destination_lat: float, destination_lon: float) -> dic
     tiny ghat-section halt with almost no trains, so the train check needs to
     be free to arrive at a bigger station slightly further out (Mysuru).
     """
+    overpass_failures_reset()
     place_candidates = get_nearby_place_candidates(destination_lat, destination_lon)
     trains = list_nearby_train_stations(destination_lat, destination_lon, place_candidates)
     flights = list_nearby_bus_or_flight(destination_lat, destination_lon, "flight")
@@ -244,6 +248,9 @@ def find_destination_hubs(destination_lat: float, destination_lon: float) -> dic
         "train_stations": trains,
         "nearest_flight": airports[0] if airports else None,
         "flight_airports": airports,
+        # every OSM mirror timed out -> these empty lists mean "we couldn't
+        # ask", not "there is nothing there"
+        "lookup_failed": overpass_failed_since_reset(),
     }
 
 
@@ -340,10 +347,17 @@ def check_train_connectivity(source_lat: float, source_lon: float,
     # No railhead near the destination (e.g. Kodagu/Coorg has no railway) —
     # a train can't get the traveller there, say so instead of silence.
     if not dest_stations:
+        failed = bool(dest_hubs.get("lookup_failed")) or not dest_hubs
         return {
             "mode": "train", "all_options": all_source_stations,
             "working_options": [], "recommended": None,
-            "note": "No railway station near the destination - train is not a viable mode for this trip.",
+            "data_unavailable": failed,
+            "note": (
+                "Couldn't look up railheads near the destination right now — the "
+                "OpenStreetMap servers didn't answer. Try again in a few minutes."
+                if failed else
+                "No railway station near the destination - train is not a viable mode for this trip."
+            ),
         }
 
     working_options = []
@@ -415,17 +429,35 @@ def check_flight_connectivity(source_lat: float, source_lon: float,
         destination_lat, destination_lon,
     )
     if not dest_airports:
+        failed = bool(dest_hubs.get("lookup_failed")) or not dest_hubs
         return {
             "mode": "flight", "all_options": nearby_airports, "working_options": [], "recommended": None,
-            "note": "No airport with a known code found near the destination.",
+            "data_unavailable": failed,
+            "note": (
+                "Couldn't look up airports near the destination right now — the "
+                "OpenStreetMap servers didn't answer. This isn't 'no airport', "
+                "it's 'unknown'; try again in a few minutes."
+                if failed else
+                "No airport with a known code found near the destination."
+            ),
         }
 
     working_options = []
+    data_unavailable = False
     for airport in nearby_airports:  # nearest source airport first
+        # Once the provider has refused us twice there is no point walking the
+        # rest of the airport list — every call costs seconds and comes back
+        # the same way. Bail out and report honestly instead of grinding
+        # through the whole list and calling the result "no flights".
+        if data_unavailable and not working_options:
+            break
         for dstn in dest_airports:  # admin-proximity order
-            destinations = get_destinations_from(
+            destinations, data_ok = get_destinations_from(
                 airport["iata"], airport["name"], airport["lat"], airport["lon"], travel_date
             )
+            if not data_ok:
+                data_unavailable = True
+                break
             if not any(d["iata"] == dstn["iata"] for d in destinations):
                 continue
             last_mile = estimate_last_mile(dstn["lat"], dstn["lon"], destination_lat, destination_lon)
@@ -460,6 +492,15 @@ def check_flight_connectivity(source_lat: float, source_lon: float,
         result["recommended_reason"] = _explain_choice(
             "flight", working_options[0], nearby_airports, working_names, travel_date
         )
+    elif data_unavailable:
+        # "we couldn't look" is a different answer from "there's nothing", and
+        # the traveller deserves to be told which one this is
+        result["data_unavailable"] = True
+        result["note"] = (
+            "Couldn't check flight schedules right now — the flight data "
+            "provider is rate-limited or unreachable. Train and bus options "
+            "below are unaffected; try flights again later."
+        )
     else:
         checked = ", ".join(a["name"] for a in dest_airports[:4])
         result["note"] = (
@@ -469,18 +510,45 @@ def check_flight_connectivity(source_lat: float, source_lon: float,
     return result
 
 
+def _mode_unavailable(mode: str, exc: Exception) -> dict:
+    """A mode that blew up is reported as its own dead end, never as a dead
+    trip. The other two modes still have perfectly good answers."""
+    print(f"{mode} connectivity failed: {type(exc).__name__}: {exc}")
+    return {
+        "mode": mode, "all_options": [], "working_options": [], "recommended": None,
+        "data_unavailable": True,
+        "note": f"Couldn't check {mode} options right now ({type(exc).__name__}). "
+                f"The rest of the plan is unaffected — try this mode again later.",
+    }
+
+
 def check_all_modes(source_lat: float, source_lon: float,
                      destination_lat: float, destination_lon: float, travel_date: str,
                      destination_name: str | None = None) -> dict:
     # Compute destination hubs ONCE, share across train and flight checks —
     # this halves the Overpass load compared to before.
-    dest_hubs = find_destination_hubs(destination_lat, destination_lon)
+    try:
+        dest_hubs = find_destination_hubs(destination_lat, destination_lon)
+    except Exception as e:  # noqa: BLE001 — Overpass/Nominatim outage
+        print(f"destination hub lookup failed: {e}")
+        dest_hubs = {}
 
-    return {
-        "train": check_train_connectivity(source_lat, source_lon, destination_lat, destination_lon, travel_date, dest_hubs),
-        "bus": check_bus_connectivity(source_lat, source_lon, destination_name),
-        "flight": check_flight_connectivity(source_lat, source_lon, destination_lat, destination_lon, travel_date, dest_hubs),
-    }
+    # Each mode is checked independently: a flight-API outage must not cost the
+    # traveller their train and bus results, which is exactly what happened
+    # when one exception could unwind the whole planning run.
+    out = {}
+    for mode, fn in (
+        ("train", lambda: check_train_connectivity(
+            source_lat, source_lon, destination_lat, destination_lon, travel_date, dest_hubs)),
+        ("bus", lambda: check_bus_connectivity(source_lat, source_lon, destination_name)),
+        ("flight", lambda: check_flight_connectivity(
+            source_lat, source_lon, destination_lat, destination_lon, travel_date, dest_hubs)),
+    ):
+        try:
+            out[mode] = fn()
+        except Exception as e:  # noqa: BLE001
+            out[mode] = _mode_unavailable(mode, e)
+    return out
 
 if __name__ == "__main__":
     from geocoding import geocode

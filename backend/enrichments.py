@@ -18,6 +18,7 @@ Nominatim for food & stay (curated names, then grounded to real coordinates
 
 import os
 import re
+import time
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -55,6 +56,13 @@ STAY_BANDS = {"budget": 1200, "mid": 2500, "premium": 4500}
 # rough single-pass toll for a 2-axle car at an Indian NH plaza (₹) — used when
 # OSM carries no explicit `charge` tag, which is the common case
 TOLL_CAR_PER_PLAZA = 85
+
+# How long the per-night food+hotel section may spend in total. Each night is
+# a Gemini call plus rate-limited Nominatim lookups (~20-25s), so an
+# unbounded loop on a long trip would push the whole plan past the point
+# where the client stops waiting for it. 150s covers ~6 nights and still
+# leaves the rest of the pipeline plenty of room inside the client's window.
+STAYS_BUDGET_S = 150
 
 
 # ======================================================================
@@ -373,20 +381,10 @@ _eatery_x = _llm.with_structured_output(_EateryList)
 _hotel_x = _llm.with_structured_output(_HotelList)
 
 
-def enrich_food(geometry: list[list[float]], radius_km: float = 15,
-                preference: str = "any", note: str | None = None,
-                src: dict | None = None, dst: dict | None = None) -> dict:
-    """Real places to eat NEAR THE START (the driver's current location), within
-    roughly `radius_km`. No departure-time / meal-window logic — just "where can
-    I grab food around here"."""
-    geometry = _ensure_geometry(geometry, src, dst)
-    anchor = (geometry[0] if geometry
-              else [src["lat"], src["lon"]] if src else None)
-    if not anchor:
-        return {"kind": "food", "town": None, "radius_km": radius_km, "places": [],
-                "note": "Couldn't work out your start point."}
-
-    town = _town_at(anchor[0], anchor[1])
+def _eateries_at(anchor: list[float], town: str, radius_km: float,
+                 preference: str = "any", note: str | None = None) -> list[dict]:
+    """The Gemini -> Nominatim grounding step, shared by every "food near X"
+    caller (near the driver's start, or near an overnight itinerary stop)."""
     ask = (
         f"Near {town}, India — within about {int(radius_km)} km — name 4-5 real, "
         f"well-known places to eat that a traveller could reach quickly. "
@@ -412,11 +410,55 @@ def enrich_food(geometry: list[list[float]], radius_km: float = 15,
             "why": p.why.strip(), "where": where,
             "lat": lat, "lon": lon, "approx": approx,
         })
+    return places
+
+
+def enrich_food(geometry: list[list[float]], radius_km: float = 15,
+                preference: str = "any", note: str | None = None,
+                src: dict | None = None, dst: dict | None = None) -> dict:
+    """Real places to eat NEAR THE START (the driver's current location), within
+    roughly `radius_km`. No departure-time / meal-window logic — just "where can
+    I grab food around here"."""
+    geometry = _ensure_geometry(geometry, src, dst)
+    anchor = (geometry[0] if geometry
+              else [src["lat"], src["lon"]] if src else None)
+    if not anchor:
+        return {"kind": "food", "town": None, "radius_km": radius_km, "places": [],
+                "note": "Couldn't work out your start point."}
+
+    town = _town_at(anchor[0], anchor[1])
+    places = _eateries_at(anchor, town, radius_km, preference, note)
 
     return {
         "kind": "food", "town": town, "radius_km": radius_km, "places": places,
         "note": "AI suggestions near your start — check hours before you rely on them.",
     }
+
+
+def _hotels_at(anchor: list[float], town: str, ask_text: str) -> list[dict]:
+    """The Gemini -> Nominatim grounding step, shared by every "hotel near X"
+    caller (a rest-stop halt, or an overnight itinerary stay)."""
+    try:
+        res: _HotelList = _hotel_x.invoke([
+            ("system", "You are an India travel expert. Only real, findable hotels."),
+            ("human", ask_text),
+        ])
+    except Exception:
+        res = _HotelList(hotels=[])
+
+    options = []
+    for h in res.hotels:
+        lat, lon, approx = _place_coords(h.name.strip(), town, anchor)
+        band = h.band.strip().lower()
+        where = (h.area.strip() or town) if approx else _area_at(lat, lon, town)
+        options.append({
+            "name": h.name.strip(),
+            "band": band if band in STAY_BANDS else "mid",
+            "price_hint": f"~Rs {STAY_BANDS.get(band, STAY_BANDS['mid'])}/night",
+            "why": h.why.strip(), "where": where,
+            "lat": lat, "lon": lon, "approx": approx,
+        })
+    return options
 
 
 def enrich_stay(geometry: list[list[float]], radius_km: float = 150,
@@ -441,26 +483,7 @@ def enrich_stay(geometry: list[list[float]], radius_km: float = 150,
     )
     if note:
         ask += f"Preference: {note}. "
-    try:
-        res: _HotelList = _hotel_x.invoke([
-            ("system", "You are an India road-trip expert. Only real, findable hotels."),
-            ("human", ask),
-        ])
-    except Exception:
-        res = _HotelList(hotels=[])
-
-    options = []
-    for h in res.hotels:
-        lat, lon, approx = _place_coords(h.name.strip(), town, pt)
-        band = h.band.strip().lower()
-        where = (h.area.strip() or town) if approx else _area_at(lat, lon, town)
-        options.append({
-            "name": h.name.strip(),
-            "band": band if band in STAY_BANDS else "mid",
-            "price_hint": f"~Rs {STAY_BANDS.get(band, STAY_BANDS['mid'])}/night",
-            "why": h.why.strip(), "where": where,
-            "lat": lat, "lon": lon, "approx": approx,
-        })
+    options = _hotels_at(pt, town, ask)
 
     return {
         "kind": "stay", "town": town, "radius_km": radius_km,
@@ -468,3 +491,65 @@ def enrich_stay(geometry: list[list[float]], radius_km: float = 150,
         "options": options,
         "note": "AI suggestions with rough price bands — confirm rates before booking.",
     }
+
+
+# ======================================================================
+# food & stay around the ITINERARY  (any travel mode — this is about the
+# destination side, not the drive there)
+# ======================================================================
+def stays_and_food_for_itinerary(itinerary: list[dict]) -> list[dict]:
+    """One food + stay suggestion set per overnight halt — the last place
+    visited each day, for every day except the final one (the trip ends
+    that day, so there's no further night to plan for). Works the same
+    whether the traveller drove, flew, took a train or a bus — it's about
+    where they'll actually be standing at the end of each day."""
+    if not itinerary:
+        return []
+
+    by_day: dict[int, list[dict]] = {}
+    for s in itinerary:
+        by_day.setdefault(s["day"], []).append(s)
+    days = sorted(by_day)
+
+    # Each night costs a Gemini call plus several rate-limited Nominatim
+    # lookups — roughly 15-20 seconds. On a 10-day trip that alone would
+    # outlast the client's patience and take the whole plan down with it, so
+    # the section runs against a wall-clock budget: nights we reach are
+    # filled in, the rest come back marked `skipped` for the UI to offer
+    # on demand. A partial answer beats a failed plan.
+    deadline = time.monotonic() + STAYS_BUDGET_S
+
+    out: list[dict] = []
+    for day in days[:-1]:                    # the last day needs no further night
+        anchor_stop = by_day[day][-1]
+        anchor = [anchor_stop["lat"], anchor_stop["lon"]]
+
+        if time.monotonic() > deadline:
+            out.append({
+                "day": day, "anchor": anchor_stop["name"], "town": None,
+                "food": [], "stay": [], "skipped": True,
+            })
+            continue
+
+        try:
+            town = _town_at(anchor[0], anchor[1])
+            food = _eateries_at(anchor, town, 10)
+            hotel_ask = (
+                f"In or near {town}, India — name 3 real hotels or lodges good for "
+                f"an overnight halt on a sightseeing trip (safe, well-reviewed, "
+                f"reasonably close to the sights). "
+            )
+            stay = _hotels_at(anchor, town, hotel_ask)
+        except Exception as e:  # noqa: BLE001 — one bad night, not a bad trip
+            print(f"stay/food lookup failed for day {day}: {type(e).__name__}: {e}")
+            out.append({
+                "day": day, "anchor": anchor_stop["name"], "town": None,
+                "food": [], "stay": [], "skipped": True,
+            })
+            continue
+
+        out.append({
+            "day": day, "anchor": anchor_stop["name"], "town": town,
+            "food": food, "stay": stay,
+        })
+    return out

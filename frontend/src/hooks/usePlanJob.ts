@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import toast from "react-hot-toast";
 
-import { startPlan, pollPlan, type PlanInput } from "@/api/plan";
+import { startPlan, pollPlan, PlanTimeoutError, type PlanInput } from "@/api/plan";
 import { apiErrorMessage } from "@/lib/api";
 import type { PlanJob } from "@/types/api";
 
@@ -40,6 +40,10 @@ export function usePlanJob() {
       setState((s) => ({ ...s, job: started }));
 
       const finished = await pollPlan(started.job_id, {
+        // each poll is an in-memory dict read on the server, and a tighter
+        // interval is what makes the streamed sections feel like they arrive
+        // as they're ready rather than in 2-second jumps
+        intervalMs: 1200,
         signal: ctrl.signal,
         onTick: (job, elapsedMs) => {
           setState((s) => ({ ...s, job: { ...job }, elapsedMs }));
@@ -48,11 +52,16 @@ export function usePlanJob() {
       if (ctrl.signal.aborted) return;
 
       if (finished.state === "error") {
+        // the backend now sends one readable sentence; fall back only if it
+        // somehow didn't
+        const why = finished.error?.trim();
         setState((s) => ({
           ...s,
           phase: "error",
           job: finished,
-          errorMessage: "The planner hit an error. Try again in a moment.",
+          errorMessage: why
+            ? `The planner hit an error: ${why}`
+            : "The planner hit an error. Try again in a moment.",
         }));
         toast.error("Planning failed — try again.");
       } else {
@@ -60,7 +69,12 @@ export function usePlanJob() {
       }
     } catch (err) {
       if (ctrl.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
-      const msg = apiErrorMessage(err, "Could not plan this trip.");
+      // A timeout is not a failure to plan — the job is still running on the
+      // server. Say that, instead of the catch-all that told the user nothing.
+      const msg =
+        err instanceof PlanTimeoutError
+          ? err.message
+          : apiErrorMessage(err, "Could not plan this trip.");
       setState((s) => ({ ...s, phase: "error", errorMessage: msg }));
       toast.error(msg);
     }

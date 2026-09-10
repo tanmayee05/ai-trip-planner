@@ -113,6 +113,9 @@ export interface ModeResult {
   recommended: HubOption | null;
   recommended_reason?: string;
   note?: string;
+  /** true when we could not CHECK this mode (provider rate-limited / down) —
+   *  which is a different answer from "checked, nothing runs" */
+  data_unavailable?: boolean;
   dest_hubs_considered?: string[];
   district_stands?: HubOption[]; // bus only
 }
@@ -244,6 +247,34 @@ export interface StayResult {
   note?: string;
 }
 
+// ---- food + hotel suggestions around the ITINERARY (any travel mode) ----
+export interface ItineraryStayFood {
+  day: number;
+  anchor: string; // the last place visited that day — where you'd be staying the night
+  town: string | null;
+  food: EateryPlace[];
+  stay: StayOption[];
+  /** the night was left unfilled — the lookup ran out of its time budget or
+   *  failed, rather than genuinely finding nothing */
+  skipped?: boolean;
+}
+
+// ---- the trip back — same shape as the outbound `PlanResult` transport
+// fields, plus who/where it starts and ends at ----
+export interface ReturnLeg {
+  from_label?: string;
+  to_label?: string;
+  // own-vehicle:
+  mode?: "drive";
+  drive?: DriveResult | null;
+  drive_hours?: number | null;
+  tolls?: TollInfo | null;
+  // public transport:
+  train?: ModeResult;
+  bus?: ModeResult;
+  flight?: ModeResult;
+}
+
 export interface FuelEstimate {
   fuel_type: string;
   mileage_kmpl: number;
@@ -280,11 +311,19 @@ export interface PlanResult {
 
   itinerary?: ItineraryStop[]; // present when the plan was built from picked stops
   itinerary_notes?: ItineraryNote[]; // the agent's "why this day" reasoning
+  itinerary_stays?: ItineraryStayFood[]; // food + hotel picks for each overnight stop
+  return?: ReturnLeg; // the trip back, in the reverse direction
   costs?: CostBreakdown;
 }
 
 // ---- plan job (async) ----
 export type PlanState = "running" | "done" | "error";
+
+/** One step of the planning run, as the backend advertises it up front. */
+export interface PlanStage {
+  key: string; // "itinerary" | "stays" | "transport" | "drive" | "return" | "costs"
+  label: string; // what to show the traveller
+}
 
 export interface PlanJob {
   job_id: string;
@@ -296,6 +335,13 @@ export interface PlanJob {
   trip_id?: number | null;
   result?: PlanResult | null;
   error?: string | null;
+  // ---- live progress while state === "running" ----
+  /** every stage THIS trip will go through, known before any work starts */
+  stages?: PlanStage[];
+  /** the stage keys finished so far */
+  stages_done?: string[];
+  /** the plan as it stands — same shape as `result`, filled in as it builds */
+  partial?: PlanResult | null;
 }
 
 // ---- trips (history) ----
@@ -314,4 +360,5 @@ export interface TripDetail extends TripSummary {
   dest_lat: number;
   dest_lon: number;
   result: PlanResult;
+  chat_session_id?: string | null; // the chat that planned this trip, if any
 }

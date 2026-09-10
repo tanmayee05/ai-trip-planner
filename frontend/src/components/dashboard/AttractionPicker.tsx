@@ -39,15 +39,15 @@ const CAT_ICON: Record<string, typeof Mountain> = {
 };
 
 const CAT_TONE: Record<string, string> = {
-  "hill station": "bg-lime/20 text-[#1B7A4F]",
+  "hill station": "bg-lime/20 text-[#146B52]",
   backwater: "bg-teal-100 text-teal-700",
-  beach: "bg-sky/20 text-[#2E4FA8]",
-  wildlife: "bg-lime/20 text-[#1B7A4F]",
-  heritage: "bg-sunny/25 text-[#8a5a00]",
+  beach: "bg-sky/20 text-[#12486D]",
+  wildlife: "bg-lime/20 text-[#146B52]",
+  heritage: "bg-sunny/25 text-[#8A5A12]",
   city: "bg-grape/15 text-grape",
   temple: "bg-bubble/15 text-bubble",
-  fort: "bg-sunny/25 text-[#8a5a00]",
-  waterfall: "bg-sky/20 text-[#2E4FA8]",
+  fort: "bg-sunny/25 text-[#8A5A12]",
+  waterfall: "bg-sky/20 text-[#12486D]",
   lake: "bg-teal-100 text-teal-700",
   other: "bg-brand-100 text-brand-700",
 };
@@ -71,6 +71,9 @@ export function AttractionPicker({ destination, initialSelected = [], onPlan, on
   const [cat, setCat] = useState<string>("all");
 
   const places = q.data?.places ?? [];
+  // the backend echoes back the RESOLVED destination, which can differ from
+  // what was typed when it recovered from a misspelling
+  const shownName = q.data?.destination || destination;
 
   const categories = useMemo(() => {
     const counts = new Map<string, number>();
@@ -123,7 +126,7 @@ export function AttractionPicker({ destination, initialSelected = [], onPlan, on
           <div className="pt-0.5">
             <h2 className="font-display text-xl font-extrabold leading-none">Choose your stops</h2>
             <p className="mt-1 text-xs font-medium text-ink-faint">
-              Popular places in {destination}. Pick any — or none for a straight A→B plan.
+              Popular places in {shownName}. Pick the ones you want to visit.
             </p>
           </div>
         </div>
@@ -193,11 +196,17 @@ export function AttractionPicker({ destination, initialSelected = [], onPlan, on
       {/* action bar */}
       <div className="mt-4 flex items-center justify-between gap-3 border-t border-ink/5 pt-4">
         <span className="text-xs font-medium text-ink-soft">
-          {selected.size === 0 ? "No stops selected" : `${selected.size} stop${selected.size > 1 ? "s" : ""} selected`}
+          {selected.size === 0
+            ? "Pick at least one place to continue"
+            : `${selected.size} stop${selected.size > 1 ? "s" : ""} selected`}
         </span>
-        <button className="btn-primary" onClick={submit} disabled={q.isLoading}>
+        <button
+          className="btn-primary"
+          onClick={submit}
+          disabled={q.isLoading || selected.size === 0}
+        >
           <Wand2 className="h-4 w-4" />
-          {selected.size === 0 ? "Plan without stops" : "Plan my trip"}
+          Plan my trip
         </button>
       </div>
     </div>
@@ -217,7 +226,7 @@ function PlaceSection({
     <section>
       <div className="mb-2 flex items-center gap-2">
         <h3 className="font-display text-sm font-extrabold text-ink">{title}</h3>
-        {hint && <span className="sticker !bg-sky/20 !text-[#2E4FA8]">{hint}</span>}
+        {hint && <span className="sticker !bg-sky/20 !text-[#12486D]">{hint}</span>}
         <span className="h-0.5 flex-1 rounded-full bg-ink/10" />
       </div>
       <div className="grid gap-2.5 sm:grid-cols-2">{children}</div>
@@ -240,7 +249,7 @@ function FilterChip({
     <button
       onClick={onClick}
       className={cn(
-        "rounded-full border-2 px-2.5 py-1 text-[11px] font-extrabold capitalize transition active:scale-95",
+        "rounded-full border px-2.5 py-1 text-[11px] font-extrabold capitalize transition active:scale-95",
         active
           ? "border-ink bg-brand-500 text-white shadow-chunky-sm"
           : "border-ink/15 bg-cream text-ink-soft hover:border-ink/30 hover:text-ink",
@@ -268,15 +277,15 @@ function PlaceCard({
       onClick={onToggle}
       whileTap={{ scale: 0.97 }}
       className={cn(
-        "relative flex flex-col rounded-2xl border-2 p-3 text-left transition-all hover:-translate-y-1",
+        "relative flex flex-col rounded-2xl border p-3 text-left transition-all hover:-translate-y-1",
         selected
-          ? "border-teal-500 bg-teal-100/70 shadow-[0_4px_0_0_theme('colors.teal.700')]"
+          ? "border-teal-500/60 bg-teal-100/60 shadow-soft ring-2 ring-teal-500/25"
           : "border-ink/10 bg-cream hover:border-ink/25 hover:shadow-chunky-sm",
       )}
     >
       <span
         className={cn(
-          "absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border-2 transition",
+          "absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border transition",
           selected ? "border-ink bg-teal-500 text-white" : "border-ink/20 bg-paper",
         )}
       >
@@ -297,7 +306,7 @@ function PlaceCard({
           {place.category}
         </span>
         {place.scope === "nearby" && place.approx_hours != null && (
-          <span className="sticker !bg-sky/20 !text-[#2E4FA8] !shadow-none">~{place.approx_hours}h</span>
+          <span className="sticker !bg-sky/20 !text-[#12486D] !shadow-none">~{place.approx_hours}h</span>
         )}
       </div>
       <span className="mt-1.5 pr-6 font-display text-sm font-extrabold text-ink">{place.name}</span>

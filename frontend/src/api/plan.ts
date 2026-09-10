@@ -19,6 +19,7 @@ export interface PlanInput {
   num_people?: number | null;
   travel_mode?: TravelMode;
   stops?: PlanStop[];
+  chat_session_id?: string | null; // links the saved trip back to its chat transcript
 }
 
 /** Kick off a plan. Returns immediately with a job in state "running". */
@@ -57,13 +58,26 @@ interface PollOptions {
   signal?: AbortSignal;
 }
 
+/** Thrown when the job is still running after `timeoutMs`. Its own class so
+ *  the UI can say "still working, we stopped watching" rather than the
+ *  catch-all "could not plan this trip", which is a different thing. */
+export class PlanTimeoutError extends Error {
+  constructor(readonly jobId: string, readonly elapsedMs: number) {
+    super(
+      `Still planning after ${Math.round(elapsedMs / 1000)}s — the map and travel-data ` +
+        `services are being slow. Your trip may still finish; try again in a few minutes.`,
+    );
+    this.name = "PlanTimeoutError";
+  }
+}
+
 /**
  * Poll a plan job until it finishes. Resolves with the final job (state
  * "done" or "error"); rejects on timeout or if aborted.
  */
 export async function pollPlan(
   jobId: string,
-  { intervalMs = 2000, timeoutMs = 300_000, onTick, signal }: PollOptions = {},
+  { intervalMs = 2000, timeoutMs = 600_000, onTick, signal }: PollOptions = {},
 ): Promise<PlanJob> {
   const started = Date.now();
   for (;;) {
@@ -72,7 +86,7 @@ export async function pollPlan(
     const elapsed = Date.now() - started;
     onTick?.(job, elapsed);
     if (job.state !== "running") return job;
-    if (elapsed > timeoutMs) throw new Error("Planning is taking too long — try again.");
+    if (elapsed > timeoutMs) throw new PlanTimeoutError(jobId, elapsed);
     await new Promise((res) => setTimeout(res, intervalMs));
   }
 }

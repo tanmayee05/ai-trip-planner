@@ -47,7 +47,7 @@ def init_db():
     conn.close()
 
 
-def fetch_departures(iata_code: str, from_local: str, to_local: str) -> list[dict]:
+def fetch_departures(iata_code: str, from_local: str, to_local: str) -> list[dict] | None:
     url = f"https://{RAPIDAPI_HOST}/flights/airports/iata/{iata_code}/{from_local}/{to_local}"
     params = {
         "withLeg": "true",
@@ -59,17 +59,25 @@ def fetch_departures(iata_code: str, from_local: str, to_local: str) -> list[dic
         "withLocation": "false",
     }
 
+    # None (the call FAILED) and [] (the call worked, this airport has no
+    # departures) mean very different things: the first must not be cached as
+    # a result, or a rate-limited hour would permanently record "no flights".
     try:
         response = requests.get(url, headers=HEADERS, params=params, timeout=30)
     except requests.exceptions.RequestException as e:
         print(f"Network error fetching {iata_code}: {e}")
-        return []  # fail gracefully — caller just gets an empty list, not a crash
+        return None
 
     if response.status_code != 200:
         print(f"AeroDataBox error for {iata_code}: {response.status_code} — {response.text[:200]}")
-        return []
+        return None
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        print(f"AeroDataBox sent non-JSON for {iata_code}")
+        return None
+
     flights = []
     for dep in data.get("departures", []):
         arrival_airport = dep.get("arrival", {}).get("airport", {})
@@ -87,7 +95,13 @@ def fetch_departures(iata_code: str, from_local: str, to_local: str) -> list[dic
     return flights
 
 
-def store_departures(origin_iata: str, origin_name: str, origin_lat: float, origin_lon: float, date: str):
+def store_departures(origin_iata: str, origin_name: str, origin_lat: float, origin_lon: float, date: str) -> bool:
+    """Fetch + store one airport's departures for one date.
+
+    Returns True only if every window came back from the API. False means the
+    provider refused us (quota, network, outage) — the caller must NOT record
+    this (airport, date) as checked, or the gap becomes permanent.
+    """
     conn = sqlite3.connect(DB_FILE)
     conn.execute(
         "INSERT OR REPLACE INTO airports VALUES (?, ?, ?, ?)",
@@ -100,8 +114,12 @@ def store_departures(origin_iata: str, origin_name: str, origin_lat: float, orig
     ]
 
     total = 0
+    ok = True
     for from_local, to_local in windows:
         flights = fetch_departures(origin_iata, from_local, to_local)
+        if flights is None:      # the provider knocked us back
+            ok = False
+            break                # a second window would just burn another call
         for f in flights:
             conn.execute("""
                 INSERT OR REPLACE INTO flights VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -116,7 +134,11 @@ def store_departures(origin_iata: str, origin_name: str, origin_lat: float, orig
 
     conn.commit()
     conn.close()
-    print(f"Stored {total} departures for {origin_iata} on {date}")
+    if ok:
+        print(f"Stored {total} departures for {origin_iata} on {date}")
+    else:
+        print(f"Flight data unavailable for {origin_iata} on {date} — not caching this as a result")
+    return ok
 
 
 if __name__ == "__main__":

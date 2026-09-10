@@ -28,8 +28,8 @@ const PRIVATE = new Set(["shell", "reliance", "nayara"]);
 
 const PRICE: Record<FuelType, number> = { petrol: 105, diesel: 92, cng: 80 };
 const BAND_TONE: Record<string, string> = {
-  budget: "bg-lime/20 text-[#1B7A4F]",
-  mid: "bg-sky/20 text-[#2E4FA8]",
+  budget: "bg-lime/20 text-[#146B52]",
+  mid: "bg-sky/20 text-[#12486D]",
   premium: "bg-bubble/15 text-bubble",
 };
 
@@ -154,7 +154,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
             key={v.label}
             onClick={() => setVehicle(v.label)}
             className={cn(
-              "flex items-center gap-1.5 rounded-full border-2 px-2.5 py-1 text-[11px] font-extrabold transition active:scale-95",
+              "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-extrabold transition active:scale-95",
               vehicle === v.label ? "border-ink bg-brand-500 text-white shadow-chunky-sm" : "border-ink/15 bg-cream text-ink-soft hover:border-ink/30",
             )}
           >
@@ -164,7 +164,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
         <button
           onClick={() => setVehicle("custom")}
           className={cn(
-            "rounded-full border-2 px-2.5 py-1 text-[11px] font-extrabold transition active:scale-95",
+            "rounded-full border px-2.5 py-1 text-[11px] font-extrabold transition active:scale-95",
             vehicle === "custom" ? "border-ink bg-brand-500 text-white shadow-chunky-sm" : "border-ink/15 bg-cream text-ink-soft hover:border-ink/30",
           )}
         >
@@ -178,7 +178,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
         )}
         {(["petrol", "diesel", "cng"] as FuelType[]).map((f) => (
           <button key={f} onClick={() => setFuelType(f)}
-            className={cn("rounded-full border-2 px-2.5 py-1 text-[11px] font-bold capitalize transition",
+            className={cn("rounded-full border px-2.5 py-1 text-[11px] font-bold capitalize transition",
               fuelType === f ? "border-ink bg-ink text-white" : "border-ink/15 text-ink-soft")}>
             {f}
           </button>
@@ -189,7 +189,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
       <div className="flex flex-wrap gap-1.5">
         {COMPANIES.map((c) => (
           <button key={c} onClick={() => setCompany(c)}
-            className={cn("rounded-full border-2 px-2.5 py-1 text-[11px] font-bold transition active:scale-95",
+            className={cn("rounded-full border px-2.5 py-1 text-[11px] font-bold transition active:scale-95",
               company === c ? "border-ink bg-brand-500 text-white shadow-chunky-sm" : "border-ink/15 bg-cream text-ink-soft hover:border-ink/30")}>
             {c}
           </button>
@@ -225,7 +225,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
       {/* ---- fuel stops (toggle) ---- */}
       <button onClick={togglePumps}
         disabled={loading === "pumps" || !geometry.length}
-        className={cn("mt-3 w-full !py-2 text-xs disabled:opacity-50", fuelStops.length ? "btn-ghost !border-2 !border-ink/15" : "btn-teal")}>
+        className={cn("mt-3 w-full !py-2 text-xs disabled:opacity-50", fuelStops.length ? "btn-ghost !border !border-ink/15" : "btn-teal")}>
         {loading === "pumps" ? <Loader2 className="h-4 w-4 animate-spin" />
           : fuelStops.length ? <EyeOff className="h-4 w-4" /> : <MapPinned className="h-4 w-4" />}
         {fuelStops.length ? `Hide petrol pumps (${fuelStops.length})` : "Show petrol pumps along the route"}
@@ -247,11 +247,11 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
         <div className="mt-3 rounded-2xl bg-paper/80 p-3 ring-1 ring-inset ring-ink/10">
           <div className="flex items-center justify-between">
             <p className="flex items-center gap-1.5 text-xs font-bold text-ink-soft">
-              <TicketCheck className="h-4 w-4 text-[#8B5CF6]" />
+              <TicketCheck className="h-4 w-4 text-[#7A6A9B]" />
               {tolls.count} toll plaza{tolls.count > 1 ? "s" : ""} · ~₹{tolls.car_cost_round_trip} car (round trip)
             </p>
             <button onClick={() => setShowTolls((v) => !v)}
-              className="flex items-center gap-1 rounded-full border-2 border-ink/15 px-2 py-0.5 text-[10px] font-bold text-ink-soft hover:border-ink/30">
+              className="flex items-center gap-1 rounded-full border border-ink/15 px-2 py-0.5 text-[10px] font-bold text-ink-soft hover:border-ink/30">
               <EyeOff className="h-3 w-3" /> {showTolls ? "Hide" : "Show"}
             </button>
           </div>
@@ -279,7 +279,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
         <div className="mt-4 flex flex-wrap gap-1.5">
           {skipped.map((o) => (
             <button key={o.id} onClick={() => setOffer(o.id, "open")}
-              className="flex items-center gap-1 rounded-full border-2 border-dashed border-ink/20 px-2.5 py-1 text-[11px] font-bold text-ink-soft hover:border-brand-400 hover:text-brand-600">
+              className="flex items-center gap-1 rounded-full border border-dashed border-ink/20 px-2.5 py-1 text-[11px] font-bold text-ink-soft hover:border-brand-400 hover:text-brand-600">
               {o.kind === "food" ? <UtensilsCrossed className="h-3 w-3" /> : <BedDouble className="h-3 w-3" />}
               {o.kind === "food" ? "Food near me?" : "Rest stop?"}
             </button>
@@ -295,7 +295,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
             ? "Want me to find places to eat near you?"
             : o.question;
           return (
-            <div key={o.id} className="rounded-2xl border-2 border-ink/10 bg-cream p-3">
+            <div key={o.id} className="rounded-2xl border border-ink/10 bg-cream p-3">
               <p className="flex items-start gap-2 text-sm font-semibold text-ink">
                 {o.kind === "food" ? <UtensilsCrossed className="mt-0.5 h-4 w-4 shrink-0 text-brand-500" /> : <BedDouble className="mt-0.5 h-4 w-4 shrink-0 text-brand-500" />}
                 {question}
@@ -321,13 +321,13 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
                     </label>
                     {(["any", "meals", "snacks", "tiffins"] as Pref[]).map((p) => (
                       <button key={p} onClick={() => setPref(p)}
-                        className={cn("rounded-full border-2 px-2 py-0.5 text-[10px] font-bold capitalize",
+                        className={cn("rounded-full border px-2 py-0.5 text-[10px] font-bold capitalize",
                           pref === p ? "border-ink bg-ink text-white" : "border-ink/15 text-ink-soft")}>{p}</button>
                     ))}
                   </div>
                   <button onClick={toggleFood}
                     disabled={loading === "food"}
-                    className={cn("w-full !py-1.5 text-xs disabled:opacity-50", food ? "btn-ghost !border-2 !border-ink/15" : "btn-teal")}>
+                    className={cn("w-full !py-1.5 text-xs disabled:opacity-50", food ? "btn-ghost !border !border-ink/15" : "btn-teal")}>
                     {loading === "food" ? <Loader2 className="h-4 w-4 animate-spin" />
                       : food ? <EyeOff className="h-3.5 w-3.5" /> : <UtensilsCrossed className="h-3.5 w-3.5" />}
                     {food ? `Hide food stops (${food.places.length})` : "Find food near me"}
@@ -347,7 +347,7 @@ export function DriveAssistant({ drive, offers, tolls, source, destination, onRo
                   </label>
                   <button onClick={toggleStay}
                     disabled={loading === "stay"}
-                    className={cn("w-full !py-1.5 text-xs disabled:opacity-50", stay ? "btn-ghost !border-2 !border-ink/15" : "btn-teal")}>
+                    className={cn("w-full !py-1.5 text-xs disabled:opacity-50", stay ? "btn-ghost !border !border-ink/15" : "btn-teal")}>
                     {loading === "stay" ? <Loader2 className="h-4 w-4 animate-spin" />
                       : stay ? <EyeOff className="h-3.5 w-3.5" /> : <BedDouble className="h-3.5 w-3.5" />}
                     {stay ? `Hide hotels (${stay.options.length})` : "Find a rest stop"}

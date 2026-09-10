@@ -15,6 +15,7 @@ touches the same region almost instant, and the cache survives restarts.
 # requests is the general-purpose tool for calling any web API.
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -36,13 +37,22 @@ _GEO_CACHE_DIR = Path(__file__).with_name(".geo_cache")
 _MIN_REQUEST_GAP_S = 1.1
 _last_request_at = 0.0
 
+# The planner runs its itinerary and transport branches on separate threads,
+# and both of them geocode. Without a lock, two threads read the same
+# `_last_request_at`, both decide they need not wait, and fire at once —
+# breaking the 1 req/s policy we're obliged to honour (Nominatim blocks
+# offenders). Holding the lock ACROSS the sleep is the point: it makes each
+# waiter re-measure the gap from the previous caller's actual send time.
+_throttle_lock = threading.Lock()
+
 
 def _throttle() -> None:
     global _last_request_at
-    wait = _MIN_REQUEST_GAP_S - (time.monotonic() - _last_request_at)
-    if wait > 0:
-        time.sleep(wait)
-    _last_request_at = time.monotonic()
+    with _throttle_lock:
+        wait = _MIN_REQUEST_GAP_S - (time.monotonic() - _last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
 
 
 def _get_json(url: str, params: dict):

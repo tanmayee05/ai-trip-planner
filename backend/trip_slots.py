@@ -47,12 +47,18 @@ class TripSlots(BaseModel):
 
 
 # The order we ask questions in — top to bottom
-REQUIRED_FIELDS = ["destination", "source", "num_days", "start_date", "end_date", "budget", "travel_mode"]
+REQUIRED_FIELDS = ["destination", "source", "num_days", "num_people", "start_date", "end_date", "budget", "travel_mode"]
+
+# What the WEB planner actually consumes. `end_date` and `budget` are only read
+# by the standalone chat_loop.py CLI, so asking for them in the app is friction
+# for data nothing downstream uses.
+PLANNER_FIELDS = ["destination", "source", "num_days", "num_people", "start_date", "travel_mode"]
 
 QUESTIONS = {
     "destination": "Where would you like to go?",
     "source": "Where are you starting your journey from?",
     "num_days": "How many days is the trip?",
+    "num_people": "How many people are travelling?",
     "start_date": "When would you like to start (YYYY-MM-DD)?",
     "end_date": "And what date do you plan to return (YYYY-MM-DD)?",
     "budget": "What's your approximate budget for the trip, in rupees?",
@@ -70,15 +76,24 @@ CONDITIONAL_QUESTIONS = {
 }
 
 
-def next_question(slots: TripSlots) -> Optional[str]:
-    for field in REQUIRED_FIELDS:
+def next_question(
+    slots: TripSlots,
+    fields: Optional[list[str]] = None,
+    conditional: bool = True,
+) -> Optional[str]:
+    """The next thing we still need to ask about, or None when we have enough.
+
+    `fields` lets a caller narrow the checklist — the web app passes
+    PLANNER_FIELDS so it never asks for budget/end_date. `conditional=False`
+    skips the own-vehicle follow-ups, which the web UI collects with its own
+    controls rather than in chat.
+    """
+    for field in fields or REQUIRED_FIELDS:
         # getattr() means result of slots.source/destination/num_days etc
         # since field is the attribute in TripSlots
         if getattr(slots, field) is None:
             return QUESTIONS[field]
-    # NEW: once required fields are filled, ask any mode-specific
-    # follow-ups relevant to the travel_mode the user picked
-    if slots.travel_mode and slots.travel_mode in CONDITIONAL_QUESTIONS:
+    if conditional and slots.travel_mode and slots.travel_mode in CONDITIONAL_QUESTIONS:
         for field, question in CONDITIONAL_QUESTIONS[slots.travel_mode].items():
             if getattr(slots, field) is None:
                 return question

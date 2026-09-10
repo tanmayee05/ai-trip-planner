@@ -72,7 +72,7 @@ export function AuthForm() {
       className="card w-full max-w-sm p-7 sm:p-8"
     >
       {/* mode toggle */}
-      <div className="mb-6 grid grid-cols-2 gap-1 rounded-2xl border-2 border-ink/10 bg-cream p-1">
+      <div className="mb-6 grid grid-cols-2 gap-1 rounded-2xl border border-ink/10 bg-cream p-1">
         {(["signin", "signup"] as const).map((m) => (
           <button
             key={m}

@@ -26,6 +26,7 @@ existing logic unchanged.
 import operator
 import os
 import re
+from datetime import date, timedelta
 from typing import Annotated, Literal, TypedDict
 
 from dotenv import load_dotenv
@@ -35,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from connectivity import check_all_modes
 from distance import straight_line_distance_km
-from enrichments import toll_plazas_along_route
+from enrichments import toll_plazas_along_route, stays_and_food_for_itinerary
 from itinerary import build_itinerary  # deterministic fallback
 from routing import get_driving_route, get_driving_route_with_geometry
 
@@ -68,15 +69,18 @@ class TripState(TypedDict, total=False):
     itinerary: list[dict]            # flat, ordered, day-numbered  [{day, name, lat, lon, ...}]
     itinerary_notes: list[dict]      # [{day, rationale}] — the "why this day" text
     itinerary_error: str             # last validation failure, fed back into the re-prompt
+    itinerary_fatal: bool            # the LLM failure won't change on retry (quota/key)
     itinerary_tries: int
     itinerary_source: str            # "llm" | "repaired" | "fallback"
 
     # --- produced by later nodes ---
+    itinerary_stays: list[dict]         # per overnight-stop food + hotel suggestions
     transport: dict
     drive_geometry: list                # [[lat, lon], ...] downsampled road path (own-vehicle)
     drive_hours: float
     tolls: dict                        # toll plazas on the route + car-cost estimate (own-vehicle)
     offers: list[dict]                  # optional "want food / rest stop?" prompts for the UI
+    return_transport: dict              # the trip back — same shape as `transport`, plus from/to labels
     costs: dict
     result: dict
     node_log: Annotated[list[str], operator.add]
@@ -108,6 +112,20 @@ _SYSTEM = (
     "- a place far from the rest gets its own day for the transfer + a short evening stop\n"
     "- for wildlife parks / sunrise viewpoints, note in the rationale that it is a morning-first activity"
 )
+
+
+# errors that will never come good on a retry: exhausted quota, rate limits,
+# a rejected key. Anything else (a timeout, a malformed answer) is worth a
+# second go.
+_FATAL_LLM_MARKERS = (
+    "quota", "resource_exhausted", "rate limit", "429",
+    "api key", "permission_denied", "unauthenticated", "401", "403",
+)
+
+
+def _is_fatal_llm_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(m in text for m in _FATAL_LLM_MARKERS)
 
 
 def _norm(s: str) -> str:
@@ -186,6 +204,62 @@ def _flatten(plan: _ItineraryPlan, stops: list[dict]) -> tuple[list[dict], list[
 
 
 # ----------------------------------------------------------------------
+# Progress stages — what the UI shows while the plan is still being built
+# ----------------------------------------------------------------------
+# Each graph node maps to one user-facing stage. The node_log the graph
+# already accumulates tells us exactly which of these are finished, so the
+# progress animation can report real work instead of guessing from a timer.
+_NODE_STAGE: dict[str, tuple[str, str]] = {
+    "resolve": ("start", "Getting your trip ready"),
+    "cluster_itinerary": ("itinerary", "Laying out your day-by-day route"),
+    "fallback_itinerary": ("itinerary", "Laying out your day-by-day route"),
+    "plan_stays": ("stays", "Finding food and places to stay"),
+    "plan_transport": ("transport", "Checking how to get there"),
+    "assess_drive": ("drive", "Mapping the drive and its stops"),
+    "plan_return_leg": ("return", "Planning the way back"),
+    "estimate_costs": ("costs", "Adding up the budget"),
+    "assemble": ("done", "Finishing up"),
+}
+
+
+def plan_stages(travel_mode: str, has_stops: bool) -> list[dict]:
+    """The stages this particular trip will go through, in order — so the UI
+    can show a real checklist rather than a fixed list of guesses."""
+    keys = ["start"]
+    if has_stops:
+        keys += ["itinerary", "stays"]
+    keys.append("transport")
+    if travel_mode == "own_vehicle":
+        keys.append("drive")
+    keys += ["return", "costs"]
+    label = {k: l for k, l in _NODE_STAGE.values()}
+    return [{"key": k, "label": label[k]} for k in keys]
+
+
+def stages_done(state: TripState) -> list[str]:
+    """Stage keys genuinely finished, read from the state rather than from the
+    node log: cluster_itinerary logs a line for every FAILED try too, so
+    "it ran" and "it produced something" are not the same thing."""
+    log = [e.split("(")[0].strip() for e in (state.get("node_log") or [])]
+    done: list[str] = []
+    if "resolve" in log:
+        done.append("start")
+    if state.get("itinerary"):
+        done.append("itinerary")
+    if "plan_stays" in log:              # may legitimately yield an empty list
+        done.append("stays")
+    if state.get("transport"):
+        done.append("transport")
+    if "assess_drive" in log:
+        done.append("drive")
+    if "plan_return_leg" in log:
+        done.append("return")
+    if state.get("costs"):
+        done.append("costs")
+    return done
+
+
+# ----------------------------------------------------------------------
 # Nodes
 # ----------------------------------------------------------------------
 def resolve(state: TripState) -> dict:
@@ -211,13 +285,20 @@ def cluster_itinerary(state: TripState) -> dict:
         flat, notes = _flatten(plan, state["stops"])
         return {
             "itinerary": flat, "itinerary_notes": notes,
-            "itinerary_error": "", "itinerary_tries": tries,
+            "itinerary_error": "", "itinerary_tries": tries, "itinerary_fatal": False,
             "itinerary_source": "llm" if tries == 1 else "repaired",
             "node_log": [f"cluster_itinerary(ok, try {tries})"],
         }
     except Exception as e:  # noqa: BLE001 — LLM/network failure -> let the fallback handle it
-        return {"itinerary_tries": tries, "itinerary_error": f"planner error: {e}",
-                "node_log": [f"cluster_itinerary(try {tries}: exception)"]}
+        return {
+            "itinerary_tries": tries,
+            "itinerary_error": f"planner error: {e}",
+            # A blown quota or a bad key answers the same way every time.
+            # Retrying twice more just makes the traveller wait longer for
+            # the deterministic plan we were always going to fall back to.
+            "itinerary_fatal": _is_fatal_llm_error(e),
+            "node_log": [f"cluster_itinerary(try {tries}: exception)"],
+        }
 
 
 def fallback_itinerary(state: TripState) -> dict:
@@ -234,6 +315,16 @@ def fallback_itinerary(state: TripState) -> dict:
     }
 
 
+def plan_stays(state: TripState) -> dict:
+    """Food + a hotel near where the traveller actually ends up each night —
+    independent of how they got there, so it runs for both travel modes."""
+    try:
+        stays = stays_and_food_for_itinerary(state.get("itinerary") or [])
+    except Exception:  # noqa: BLE001 — Gemini/Nominatim hiccup shouldn't sink the plan
+        stays = []
+    return {"itinerary_stays": stays, "node_log": ["plan_stays"]}
+
+
 def _drive_plan(src: dict, dst: dict) -> dict:
     route = get_driving_route(src["lat"], src["lon"], dst["lat"], dst["lon"])
     if route:
@@ -246,15 +337,45 @@ def _drive_plan(src: dict, dst: dict) -> dict:
     }}
 
 
+def _transport_unavailable(travel_mode: str, exc: Exception) -> dict:
+    """A transport section that couldn't be built, in the shape the UI already
+    knows how to render — so the plan still shows, with an honest gap in it."""
+    note = (f"Couldn't work out the transport for this trip right now "
+            f"({type(exc).__name__}). Everything else below is still good — "
+            f"try re-planning in a few minutes.")
+    if travel_mode == "own_vehicle":
+        return {"mode": "drive", "drive": {}, "unavailable": True, "note": note}
+    empty = {"all_options": [], "working_options": [], "recommended": None,
+             "data_unavailable": True, "note": note}
+    return {"train": {**empty, "mode": "train"},
+            "bus": {**empty, "mode": "bus"},
+            "flight": {**empty, "mode": "flight"}}
+
+
 def plan_transport(state: TripState) -> dict:
+    """Transport for the outbound leg.
+
+    Everything here is best-effort. A traveller who picked their places and
+    waited for a plan should still get the itinerary, the map and the budget
+    even if every transport lookup is having a bad day — losing the whole
+    plan because one provider is rate-limited is the worst possible trade.
+    """
     src, dst = state["source_geo"], state["dest_geo"]
-    if state["travel_mode"] == "own_vehicle":
-        transport = _drive_plan(src, dst)
-    else:
-        transport = check_all_modes(
-            src["lat"], src["lon"], dst["lat"], dst["lon"],
-            travel_date=state["travel_date"], destination_name=state["destination"],
-        )
+    try:
+        if state["travel_mode"] == "own_vehicle":
+            transport = _drive_plan(src, dst)
+        else:
+            # check_all_modes already isolates train/bus/flight from each
+            # other; this catches anything that escapes all three.
+            transport = check_all_modes(
+                src["lat"], src["lon"], dst["lat"], dst["lon"],
+                travel_date=state["travel_date"], destination_name=state["destination"],
+            )
+    except Exception as e:  # noqa: BLE001
+        return {
+            "transport": _transport_unavailable(state["travel_mode"], e),
+            "node_log": [f"plan_transport(failed: {type(e).__name__})"],
+        }
     return {"transport": transport, "node_log": ["plan_transport"]}
 
 
@@ -277,9 +398,12 @@ def assess_drive(state: TripState) -> dict:
     offered when the drive is genuinely long.
     """
     src, dst = state["source_geo"], state["dest_geo"]
-    geo = get_driving_route_with_geometry(src["lat"], src["lon"], dst["lat"], dst["lon"])
+    try:
+        geo = get_driving_route_with_geometry(src["lat"], src["lon"], dst["lat"], dst["lon"])
+    except Exception:  # noqa: BLE001 — no road geometry just means no route line
+        geo = None
 
-    drive = state["transport"].get("drive") or {}
+    drive = (state.get("transport") or {}).get("drive") or {}
     hours = drive.get("duration_hr") or (geo["duration_hr"] if geo else 0.0)
     polyline = _downsample(geo["coordinates"]) if geo else []
 
@@ -312,9 +436,73 @@ def assess_drive(state: TripState) -> dict:
     }
 
 
+def _return_departure_date(state: TripState) -> str:
+    """Best-guess date for the trip back — the outbound date plus however many
+    days the trip runs, so train/flight schedule lookups check the right
+    weekday instead of reusing the outbound one."""
+    try:
+        out = date.fromisoformat(state["travel_date"])
+        return (out + timedelta(days=max(1, state.get("num_days") or 1))).isoformat()
+    except (ValueError, KeyError):
+        return state.get("travel_date", "")
+
+
+def plan_return_leg(state: TripState) -> dict:
+    try:
+        return _plan_return_leg(state)
+    except Exception as e:  # noqa: BLE001 — the way back is a bonus section
+        print(f"return leg failed: {type(e).__name__}: {e}")
+        return {"return_transport": {}, "node_log": [f"plan_return_leg(failed: {type(e).__name__})"]}
+
+
+def _plan_return_leg(state: TripState) -> dict:
+    """The trip back. It starts from wherever the traveller actually ends up —
+    the last itinerary stop if any were picked, otherwise the destination —
+    and ends at the original source. Own-vehicle gets the same drive-plan +
+    toll treatment as the outbound leg; public transport gets a fresh
+    train/bus/flight check in the reverse direction."""
+    itinerary = state.get("itinerary") or []
+    if itinerary:
+        last = itinerary[-1]
+        return_src = {"lat": last["lat"], "lon": last["lon"], "display_name": last["name"]}
+        from_label = last["name"]
+    else:
+        return_src = state["dest_geo"]
+        from_label = state["destination"]
+    return_dst = state["source_geo"]
+    to_label = state["source"]
+
+    if state["travel_mode"] == "own_vehicle":
+        transport = _drive_plan(return_src, return_dst)
+        geo = get_driving_route_with_geometry(
+            return_src["lat"], return_src["lon"], return_dst["lat"], return_dst["lon"]
+        )
+        drive = transport.get("drive") or {}
+        hours = drive.get("duration_hr") or (geo["duration_hr"] if geo else 0.0)
+        polyline = _downsample(geo["coordinates"]) if geo else []
+        try:
+            tolls = toll_plazas_along_route(polyline)
+        except Exception:  # noqa: BLE001
+            tolls = {"plazas": [], "count": 0, "car_cost_one_way": 0, "car_cost_round_trip": 0}
+        transport["drive"]["geometry"] = polyline
+        transport["drive_hours"] = round(hours, 1)
+        transport["tolls"] = tolls
+    else:
+        transport = check_all_modes(
+            return_src["lat"], return_src["lon"], return_dst["lat"], return_dst["lon"],
+            travel_date=_return_departure_date(state), destination_name=to_label,
+        )
+
+    transport["from_label"] = from_label
+    transport["to_label"] = to_label
+    return {"return_transport": transport, "node_log": ["plan_return_leg"]}
+
+
 def estimate_costs(state: TripState) -> dict:
     is_drive = state["travel_mode"] == "own_vehicle"
-    drive_km = (state["transport"].get("drive") or {}).get("distance_km") if is_drive else None
+    drive_km = ((state.get("transport") or {}).get("drive") or {}).get("distance_km") if is_drive else None
+    ret = state.get("return_transport") or {}
+    return_km = (ret.get("drive") or {}).get("distance_km") if is_drive else None
 
     days = max(1, state.get("num_days") or 2)
     people = max(1, state.get("num_people") or 2)
@@ -322,13 +510,16 @@ def estimate_costs(state: TripState) -> dict:
 
     items: list[dict] = []
     if is_drive and drive_km:
-        round_trip = round(drive_km * 2)
-        items.append({"label": "Fuel (round trip)", "amount": round(round_trip * FUEL_COST_PER_KM),
-                      "note": f"~Rs {FUEL_COST_PER_KM}/km x {round_trip} km"})
+        total_km = round(drive_km + (return_km if return_km is not None else drive_km))
+        items.append({"label": "Fuel (round trip)", "amount": round(total_km * FUEL_COST_PER_KM),
+                      "note": f"~Rs {FUEL_COST_PER_KM}/km x {total_km} km (there + back)"})
     tolls = state.get("tolls") or {}
-    if is_drive and tolls.get("count"):
-        items.append({"label": "Tolls (round trip)", "amount": tolls["car_cost_round_trip"],
-                      "note": f"{tolls['count']} plaza(s), car, both ways"})
+    return_tolls = ret.get("tolls") or {} if is_drive else {}
+    toll_total = (tolls.get("car_cost_one_way") or 0) + (return_tolls.get("car_cost_one_way") or 0)
+    toll_count = (tolls.get("count") or 0) + (return_tolls.get("count") or 0)
+    if is_drive and toll_count:
+        items.append({"label": "Tolls (round trip)", "amount": toll_total,
+                      "note": f"{toll_count} plaza(s), car, both ways"})
     items.append({"label": "Food", "amount": 400 * people * days,
                   "note": f"~Rs 400 x {people} people x {days} days"})
     items.append({"label": "Stay", "amount": 1500 * nights,
@@ -342,37 +533,65 @@ def estimate_costs(state: TripState) -> dict:
 
 
 def assemble(state: TripState) -> dict:
-    result = dict(state["transport"])
+    result = dict(state.get("transport") or {})
     if state.get("itinerary"):
         result["itinerary"] = state["itinerary"]
         result["itinerary_notes"] = state.get("itinerary_notes", [])
+        result["itinerary_stays"] = state.get("itinerary_stays", [])
     if result.get("mode") == "drive":
-        result["drive"]["geometry"] = state.get("drive_geometry", [])
+        # copy rather than mutate: `assemble` is now also called on every
+        # progress snapshot, and writing through to the state's own drive dict
+        # from a reporting path is asking for trouble while the other branch
+        # is still running
+        drive = dict(result.get("drive") or {})
+        drive["geometry"] = state.get("drive_geometry", [])
+        result["drive"] = drive
         result["drive_hours"] = state.get("drive_hours")
         result["tolls"] = state.get("tolls") or {"plazas": [], "count": 0}
         result["offers"] = state.get("offers", [])
-    result["costs"] = state["costs"]
+    # Only emit these once they hold something. An empty dict is TRUTHY in
+    # JavaScript, so shipping `"costs": {}` in a progress snapshot made the UI
+    # render its budget panel against no data — which crashed the whole page.
+    # Absent means "not ready yet"; present means "safe to render".
+    if state.get("return_transport"):
+        result["return"] = state["return_transport"]
+    if state.get("costs"):
+        result["costs"] = state["costs"]
     return {"result": result, "node_log": ["assemble"]}
 
 
 # ----------------------------------------------------------------------
 # Conditional edges (the routing logic)
 # ----------------------------------------------------------------------
-def after_resolve(state: TripState) -> Literal["cluster_itinerary", "plan_transport"]:
-    return "cluster_itinerary" if state.get("stops") else "plan_transport"
+def after_resolve(state: TripState) -> list[str]:
+    """Fan out: the itinerary reasoning and the transport lookups need nothing
+    from each other, so they run as two concurrent branches. The itinerary
+    branch is Gemini + Nominatim bound and the transport branch is timetable +
+    Overpass bound, so overlapping them cuts most of their combined wall time.
+    They rejoin at plan_return_leg, which needs both."""
+    return ["cluster_itinerary", "plan_transport"] if state.get("stops") else ["plan_transport"]
 
 
-def after_cluster(state: TripState) -> Literal["cluster_itinerary", "fallback_itinerary", "plan_transport"]:
+def after_cluster(state: TripState) -> Literal["cluster_itinerary", "fallback_itinerary", "plan_stays"]:  # noqa: E501
     if not state.get("itinerary_error"):
-        return "plan_transport"               # valid plan
+        return "plan_stays"                   # valid plan
+    if state.get("itinerary_fatal"):
+        return "fallback_itinerary"           # quota/key — retrying changes nothing
     if state.get("itinerary_tries", 0) < MAX_ITINERARY_TRIES:
         return "cluster_itinerary"            # retry with the error fed back
     return "fallback_itinerary"               # give up on the LLM, use the deterministic split
 
 
-def after_transport(state: TripState) -> Literal["assess_drive", "estimate_costs"]:
+def after_transport(state: TripState) -> Literal["assess_drive", "plan_return_leg"]:
     # only own-vehicle drives need the road geometry + food/rest-stop offers
-    return "assess_drive" if state["travel_mode"] == "own_vehicle" else "estimate_costs"
+    return "assess_drive" if state["travel_mode"] == "own_vehicle" else "plan_return_leg"
+
+
+def _ordered_nodes(has_stops: bool) -> list[str]:
+    """Unused at runtime — kept as the readable statement of branch order."""
+    itinerary = ["cluster_itinerary", "fallback_itinerary", "plan_stays"] if has_stops else []
+    return ["resolve", *itinerary, "plan_transport", "assess_drive",
+            "plan_return_leg", "estimate_costs", "assemble"]
 
 
 # ----------------------------------------------------------------------
@@ -383,23 +602,47 @@ def _build_graph():
     g.add_node("resolve", resolve)
     g.add_node("cluster_itinerary", cluster_itinerary)
     g.add_node("fallback_itinerary", fallback_itinerary)
+    g.add_node("plan_stays", plan_stays)
     g.add_node("plan_transport", plan_transport)
     g.add_node("assess_drive", assess_drive)
+    # defer=True makes this a BARRIER: it waits until both branches above are
+    # finished instead of firing once per incoming edge. Without it the two
+    # branches, which are different lengths, would each trigger it and the
+    # return leg would be planned twice — verified, it really does run twice.
+    g.add_node("plan_return_leg", plan_return_leg, defer=True)
     g.add_node("estimate_costs", estimate_costs)
     g.add_node("assemble", assemble)
 
     g.add_edge(START, "resolve")
-    g.add_conditional_edges("resolve", after_resolve)
+    # resolve fans out into the itinerary branch and the transport branch
+    g.add_conditional_edges("resolve", after_resolve,
+                            ["cluster_itinerary", "plan_transport"])
+    # branch A — itinerary, then the food/stay picks that depend on it
     g.add_conditional_edges("cluster_itinerary", after_cluster)
-    g.add_edge("fallback_itinerary", "plan_transport")
+    g.add_edge("fallback_itinerary", "plan_stays")
+    g.add_edge("plan_stays", "plan_return_leg")
+    # branch B — transport, plus the drive assessment for own-vehicle trips
     g.add_conditional_edges("plan_transport", after_transport)
-    g.add_edge("assess_drive", "estimate_costs")
+    g.add_edge("assess_drive", "plan_return_leg")
+    g.add_edge("plan_return_leg", "estimate_costs")
     g.add_edge("estimate_costs", "assemble")
     g.add_edge("assemble", END)
     return g.compile()
 
 
 _GRAPH = _build_graph()
+
+
+def partial_result(state: TripState) -> dict:
+    """Whatever of the plan is usable RIGHT NOW, in the same shape as the
+    finished result. `assemble` is already tolerant of missing pieces, so the
+    half-built plan renders with exactly the components the UI uses at the
+    end — the itinerary shows as soon as it exists, the map fills in when
+    transport lands, and nothing has to be re-done when the rest arrives."""
+    try:
+        return assemble(state)["result"]
+    except Exception:  # noqa: BLE001 — a progress snapshot must never break the run
+        return {}
 
 
 def run_trip_plan(
@@ -413,15 +656,50 @@ def run_trip_plan(
     source_geo: dict,
     dest_geo: dict,
     stops: list[dict] | None,
+    on_progress=None,
 ) -> dict:
-    """Run the agent to completion; return the API `result` dict."""
-    final = _GRAPH.invoke({
+    """Run the agent to completion; return the API `result` dict.
+
+    `on_progress(partial, done_stages)` is called after each super-step of the
+    graph with the plan as it stands, so the caller can publish it while the
+    rest is still being worked out. Streaming in `values` mode hands us the
+    whole accumulated state each time, which is all a snapshot needs.
+    """
+    payload = {
         "source": source, "destination": destination, "travel_date": travel_date,
         "travel_mode": travel_mode, "num_days": num_days, "num_people": num_people,
         "source_geo": source_geo, "dest_geo": dest_geo, "stops": stops or [],
         "node_log": [],
-    })
-    return final["result"]
+    }
+
+    if on_progress is None:
+        return _GRAPH.invoke(payload)["result"]
+
+    # `updates` rather than `values`, deliberately. A `values` snapshot is only
+    # emitted at the end of a SUPER-STEP, and the two branches share one — so
+    # the itinerary (≈2s) would sit unpublished until the transport lookups
+    # (minutes, on a cold region) finished with it, which defeats the whole
+    # point of streaming. `updates` fires as each node returns. The trade is
+    # that it hands us only that node's own slice of state, so we accumulate
+    # the state ourselves; `node_log` is the one reducer-backed key, appended
+    # exactly as the graph's own operator.add would.
+    merged: TripState = dict(payload)
+    for chunk in _GRAPH.stream(payload, stream_mode="updates"):
+        for update in (chunk or {}).values():
+            if not isinstance(update, dict):
+                continue
+            for key, value in update.items():
+                if key == "node_log":
+                    merged["node_log"] = list(merged.get("node_log") or []) + list(value)
+                else:
+                    merged[key] = value
+        try:
+            on_progress(partial_result(merged), stages_done(merged))
+        except Exception as e:  # noqa: BLE001 — never let reporting kill planning
+            print(f"progress callback failed: {type(e).__name__}: {e}")
+
+    # `assemble` is the last node, so its update carried the finished result
+    return merged.get("result") or partial_result(merged)
 
 
 if __name__ == "__main__":

@@ -14,3 +14,4 @@ email-validator     # lets Pydantic's EmailStr reject malformed emails
 
 # --- agent ---
 langgraph           # the trip-planning agent is a LangGraph StateGraph (see agent.py)
+tavily-python       # live web search grounding for chat answers (see chat_reply.py)

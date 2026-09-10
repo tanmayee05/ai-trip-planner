@@ -9,25 +9,30 @@ interface Props {
   drive: DriveResult | null | undefined;
   routeLabel?: string;
   hasStops: boolean;
+  emoji?: string;
+  title?: string;
 }
 
-export function DrivePanel({ drive, routeLabel, hasStops }: Props) {
+export function DrivePanel({ drive, routeLabel, hasStops, emoji = "🚗", title = "Driving it yourself" }: Props) {
   return (
     <div className="card card-hover card-sky p-5 sm:p-6">
       <SectionHeader
-        emoji="🚗"
+        emoji={emoji}
         tone="sky"
-        title="Driving it yourself"
+        title={title}
         right={
           routeLabel ? (
-            <span className="truncate rounded-full border-2 border-ink/10 bg-paper px-2.5 py-1 text-xs font-bold text-ink-soft">
+            <span className="truncate rounded-full border border-ink/10 bg-paper px-2.5 py-1 text-xs font-bold text-ink-soft">
               {routeLabel}
             </span>
           ) : undefined
         }
       />
 
-      {drive ? (
+      {/* content check, not a truthiness check: a transport lookup that failed
+          hands back `drive: {}`, which is truthy and would render the distance
+          and duration counters as NaN */}
+      {drive?.distance_km != null ? (
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -64,7 +69,7 @@ export function DrivePanel({ drive, routeLabel, hasStops }: Props) {
           </p>
         </motion.div>
       ) : (
-        <div className="flex gap-2 rounded-xl bg-sunny/15 p-3 text-xs text-[#8a5a00]">
+        <div className="flex gap-2 rounded-xl bg-sunny/15 p-3 text-xs text-[#8A5A12]">
           <Info className="mt-0.5 h-4 w-4 shrink-0" />
           <p>Couldn't compute a road route for this trip. The distance may be too long, or the map service was unavailable — try again in a moment.</p>
         </div>

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { SendHorizonal, Sparkles, Loader2, ArrowRight, RefreshCw } from "lucide-react";
+import { SendHorizonal, Sparkles, Loader2, ArrowRight, Check, CircleDashed } from "lucide-react";
 import toast from "react-hot-toast";
 
 import { sendChat, getChatHistory } from "@/api/chat";
@@ -8,10 +8,28 @@ import type { TripDraft } from "@/components/dashboard/TripRequestPanel";
 import type { TravelMode } from "@/api/plan";
 import type { TripSlots } from "@/types/api";
 import { apiErrorMessage } from "@/lib/api";
-import { todayISO } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
-const CHAT_SESSION_KEY = "wayfarer.chat_session";
+/* The chat session id deliberately lives in React state up in DashboardPage,
+ * NOT in localStorage. That gives the conversation exactly the same lifetime
+ * as the form draft: it survives switching tabs and picking stops, and it is
+ * gone on "New" or a page reload — so a new chat never opens with the
+ * previous trip's questions still in it. */
+
+/** The inverse of slotsToDraftPatch — hand the backend what we already have
+ *  so next_question() skips it. */
+export function draftToKnown(d: TripDraft) {
+  const days = parseInt(d.num_days, 10);
+  const people = parseInt(d.num_people, 10);
+  return {
+    source: d.source.trim() || null,
+    destination: d.destination.trim() || null,
+    num_days: Number.isFinite(days) && days > 0 ? days : null,
+    num_people: Number.isFinite(people) && people > 0 ? people : null,
+    start_date: d.travel_date || null,
+    travel_mode: d.travel_mode || null,
+  };
+}
 
 function slotsToDraftPatch(s: Partial<TripSlots>): Partial<TripDraft> {
   const p: Partial<TripDraft> = {};
@@ -27,9 +45,28 @@ function slotsToDraftPatch(s: Partial<TripSlots>): Partial<TripDraft> {
 interface Props {
   draft: TripDraft;
   patch: (p: Partial<TripDraft>) => void;
-  onNext: () => void;
+  /** Move the whole flow on to fetching places. Takes the patch the chat just
+   *  applied, because the `draft` prop is still the pre-patch one on the tick
+   *  a reply lands — the panel merges it before building the planner input. */
+  onNext: (override?: Partial<TripDraft>) => void;
   canNext: boolean;
   busy?: boolean;
+  sessionId: string | null;
+  onSessionId: (id: string | null) => void;
+  /** a plan is already on screen: the chat stops driving itself forward and
+   *  offers an explicit re-plan instead of restarting the flow under the user */
+  planned?: boolean;
+}
+
+/** Only the fields whose value genuinely differs from the shared draft. The
+ *  backend echoes every known slot back on each turn, so without this every
+ *  reply would look like a change and keep re-triggering the next step. */
+function changedFields(d: TripDraft, p: Partial<TripDraft>): Partial<TripDraft> {
+  const out: Partial<TripDraft> = {};
+  for (const k of Object.keys(p) as (keyof TripDraft)[]) {
+    if (p[k] !== undefined && p[k] !== d[k]) out[k] = p[k] as never;
+  }
+  return out;
 }
 
 interface Msg {
@@ -37,24 +74,32 @@ interface Msg {
   text: string;
 }
 
-export function TripChat({ draft, patch, onNext, canNext, busy = false }: Props) {
+export function TripChat({
+  draft, patch, onNext, canNext, busy = false, sessionId, onSessionId, planned = false,
+}: Props) {
   // opening line adapts to whatever the Form tab may already hold
   const greeting = useMemo<Msg>(() => {
+    if (planned) {
+      return {
+        role: "assistant",
+        text: "Your plan is ready 🎉 Want anything changed — more days, a different date, another way of travelling? Tell me and I'll redo it.",
+      };
+    }
     if (draft.source && draft.destination) {
       return {
         role: "assistant",
-        text: `Looks like you're going from ${draft.source} to ${draft.destination}. Tell me anything else — dates, how many days, how you're travelling — or just hit Next.`,
+        text: `Looks like you're going from ${draft.source} to ${draft.destination}. Tell me anything that's still missing — days, people, when you're going — and I'll take it from there.`,
       };
     }
     if (draft.destination) {
       return {
         role: "assistant",
-        text: `Heading to ${draft.destination}? Tell me where you're starting from and roughly when.`,
+        text: `Heading to ${draft.destination}? Tell me where you're starting from, when, for how many days and how many of you.`,
       };
     }
     return {
       role: "assistant",
-      text: "Hey there! 👋 Where are we headed? Just tell me your starting point, your destination, and roughly when you'd like to travel — a single sentence is all I need.",
+      text: "Hey there! 👋 Where are we headed? Tell me your starting point, your destination, when you'd like to travel, how many days and how many people — a single sentence is all I need, and I'll ask about anything you leave out.",
     };
     // greeting is fixed for the life of the component; draft changes shouldn't rewrite it
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -63,22 +108,24 @@ export function TripChat({ draft, patch, onNext, canNext, busy = false }: Props)
   // `turns` = the persisted transcript from the backend; the greeting is a
   // client-only prefix that is always shown on top.
   const [turns, setTurns] = useState<Msg[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem(CHAT_SESSION_KEY);
-    } catch {
-      return null;
-    }
-  });
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+
+  /** the backend's own verdict on whether every slot the planner needs is
+   *  filled — the chat keeps asking until this flips true */
+  const [ready, setReady] = useState(false);
+
+  /** has this conversation already pushed the flow on to fetching places?
+   *  Starts true when a plan is already on screen, so re-opening the chat to
+   *  ask a question doesn't yank the user back into the stop picker. */
+  const advanced = useRef(planned);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   const messages = useMemo<Msg[]>(() => [greeting, ...turns], [greeting, turns]);
 
-  // on mount, if we have a stored session, pull its transcript from the backend
+  // coming back to the Chat tab? pull the existing transcript from the backend
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
@@ -86,33 +133,17 @@ export function TripChat({ draft, patch, onNext, canNext, busy = false }: Props)
       .then((res) => {
         if (cancelled) return;
         setTurns(res.messages);
-        const p = slotsToDraftPatch(res.slots);
+        setReady(res.ready_to_plan);
+        const p = changedFields(draft, slotsToDraftPatch(res.slots));
         if (Object.keys(p).length) patch(p);
       })
-      .catch(() => {
-        try {
-          localStorage.removeItem(CHAT_SESSION_KEY);
-        } catch {
-          /* ignore */
-        }
-        setSessionId(null);
-      });
+      .catch(() => onSessionId(null));
     return () => {
       cancelled = true;
     };
     // once, on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  function newChat() {
-    try {
-      localStorage.removeItem(CHAT_SESSION_KEY);
-    } catch {
-      /* ignore */
-    }
-    setSessionId(null);
-    setTurns([]);
-  }
 
   useLayoutEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -133,17 +164,26 @@ export function TripChat({ draft, patch, onNext, canNext, busy = false }: Props)
     setInput("");
     setSending(true);
     try {
-      const res = await sendChat({ session_id: sessionId, message: text });
-      setSessionId(res.session_id);
-      try {
-        localStorage.setItem(CHAT_SESSION_KEY, res.session_id);
-      } catch {
-        /* ignore */
-      }
+      const res = await sendChat({
+        session_id: sessionId,
+        message: text,
+        known: draftToKnown(draft),
+      });
+      onSessionId(res.session_id);
       setTurns(res.messages); // authoritative transcript from the backend
+      setReady(res.ready_to_plan);
 
-      const p = slotsToDraftPatch(res.slots);
+      const p = changedFields(draft, slotsToDraftPatch(res.slots));
       if (Object.keys(p).length) patch(p);
+
+      // The chat runs the same flow the form does: once it has every answer
+      // it moves straight on to fetching places, instead of leaving the user
+      // looking for a button. It re-fires only when something actually
+      // changed — otherwise a follow-up question would restart the step.
+      if (res.ready_to_plan && !planned && (!advanced.current || Object.keys(p).length > 0)) {
+        advanced.current = true;
+        onNext(p); // `draft` is still pre-patch here — hand the new values over
+      }
     } catch (err) {
       const msg = apiErrorMessage(err, "The assistant didn't respond.");
       toast.error(msg);
@@ -161,21 +201,21 @@ export function TripChat({ draft, patch, onNext, canNext, busy = false }: Props)
     }
   }
 
-  const ready = !!(draft.source && draft.destination);
+  const checklist = [
+    { label: "From", value: draft.source || null },
+    { label: "To", value: draft.destination || null },
+    { label: "Date", value: draft.travel_date || null },
+    { label: "Days", value: draft.num_days ? `${draft.num_days} days` : null },
+    { label: "People", value: draft.num_people ? `${draft.num_people} people` : null },
+    {
+      label: "Travel by",
+      value: draft.travel_mode === "own_vehicle" ? "Own vehicle" : "Public transport",
+    },
+  ];
+  const anyKnown = checklist.some((c) => c.label !== "Travel by" && c.value);
 
   return (
     <div className="flex h-[26rem] flex-col">
-      {turns.length > 0 && (
-        <div className="mb-2 flex justify-end">
-          <button
-            onClick={newChat}
-            disabled={busy || sending}
-            className="flex items-center gap-1 text-[11px] font-medium text-ink-faint hover:text-ink"
-          >
-            <RefreshCw className="h-3 w-3" /> New chat
-          </button>
-        </div>
-      )}
       <div ref={scrollRef} className="flex-1 space-y-2.5 overflow-y-auto pr-1">
         {messages.map((m, i) => (
           <motion.div
@@ -212,9 +252,10 @@ export function TripChat({ draft, patch, onNext, canNext, busy = false }: Props)
         )}
       </div>
 
-      {/* shared-draft summary + Next */}
+      {/* what the conversation has captured so far — the same shared draft the
+          Form tab edits, so switching tabs shows the identical trip */}
       <AnimatePresence>
-        {ready && (
+        {(anyKnown || ready) && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
@@ -223,26 +264,42 @@ export function TripChat({ draft, patch, onNext, canNext, busy = false }: Props)
           >
             <div className="rounded-2xl bg-teal-100/70 p-3 ring-1 ring-inset ring-teal-500/20">
               <p className="flex items-center gap-1.5 text-xs font-semibold text-teal-700">
-                <Sparkles className="h-3.5 w-3.5" /> {draft.source} → {draft.destination}
+                <Sparkles className="h-3.5 w-3.5" />
+                {ready ? "Got everything I need" : "So far I have"}
               </p>
-              <div className="mt-2 flex items-end gap-2">
-                <label className="flex-1">
-                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-teal-700/80">
-                    Travel date
+
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {checklist.map((c) => (
+                  <span
+                    key={c.label}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold",
+                      c.value
+                        ? "bg-paper text-ink-soft ring-1 ring-inset ring-ink/10"
+                        : "bg-paper/60 text-ink-faint ring-1 ring-inset ring-dashed ring-ink/10",
+                    )}
+                  >
+                    {c.value ? (
+                      <Check className="h-3 w-3 text-teal-600" />
+                    ) : (
+                      <CircleDashed className="h-3 w-3" />
+                    )}
+                    {c.value ?? c.label}
                   </span>
-                  <input
-                    type="date"
-                    className="input !bg-paper !py-2"
-                    value={draft.travel_date || todayISO()}
-                    min={todayISO()}
-                    onChange={(e) => patch({ travel_date: e.target.value })}
-                    disabled={busy}
-                  />
-                </label>
-                <button className="btn-primary !py-2" disabled={busy || !canNext} onClick={onNext}>
-                  Next <ArrowRight className="h-4 w-4" />
-                </button>
+                ))}
               </div>
+
+              {/* Once a plan exists the chat stops driving the flow on its own —
+                  a change is only applied when the traveller asks for it. */}
+              {planned && (
+                <button
+                  className="btn-primary mt-2.5 w-full !py-2"
+                  disabled={busy || !canNext}
+                  onClick={() => onNext()}
+                >
+                  Re-plan with these changes <ArrowRight className="h-4 w-4" />
+                </button>
+              )}
             </div>
           </motion.div>
         )}

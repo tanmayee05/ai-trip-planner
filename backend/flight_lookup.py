@@ -42,17 +42,33 @@ def _is_cached(iata_code: str, travel_date: str) -> bool:
     return row is not None
 
 
-def get_destinations_from(iata_code: str, name: str, lat: float, lon: float, travel_date: str) -> list[dict]:
+def get_destinations_from(
+    iata_code: str, name: str, lat: float, lon: float, travel_date: str
+) -> tuple[list[dict], bool]:
     """
     Return every destination this airport has scheduled flights to, ON
-    THE GIVEN DATE. travel_date format: 'YYYY-MM-DD'.
+    THE GIVEN DATE, plus whether that answer can be trusted.
+
+    `(destinations, data_ok)`:
+      * `data_ok=True`  — we have real schedule data for this (airport, date);
+        an empty list genuinely means "nothing flies from here that day".
+      * `data_ok=False` — the provider was rate-limited or unreachable and we
+        have nothing cached, so an empty list means "we don't know". The
+        caller must say so rather than reporting "no flights".
+
     Fetches from the API only if this exact (airport, date) isn't cached yet.
     """
     init_db()
 
+    data_ok = True
     if not _is_cached(iata_code, travel_date):
-        store_departures(iata_code, name, lat, lon, travel_date)
-        _mark_checked(iata_code, travel_date)
+        # Only record the (airport, date) as checked when the fetch actually
+        # succeeded. Marking a failed call would cache "no flights" forever,
+        # so one exhausted-quota hour would blank this airport permanently.
+        if store_departures(iata_code, name, lat, lon, travel_date):
+            _mark_checked(iata_code, travel_date)
+        else:
+            data_ok = False
 
     conn = sqlite3.connect(DB_FILE)
     rows = conn.execute("""
@@ -62,7 +78,9 @@ def get_destinations_from(iata_code: str, name: str, lat: float, lon: float, tra
     """, (iata_code, travel_date)).fetchall()
     conn.close()
 
-    return [{"iata": r[0], "name": r[1]} for r in rows]
+    # rows may still exist from an earlier successful run even if today's call
+    # failed — data we already have is data we can use
+    return [{"iata": r[0], "name": r[1]} for r in rows], (data_ok or bool(rows))
 
 
 def find_connecting_flights(origin_iata: str, dest_iata: str, travel_date: str) -> list[dict]:
@@ -94,8 +112,8 @@ def find_connecting_flights(origin_iata: str, dest_iata: str, travel_date: str) 
 
 if __name__ == "__main__":
     # Simulates a user asking about a specific travel date
-    destinations = get_destinations_from(
+    destinations, ok = get_destinations_from(
         "TIR", "Tirupati Airport", 13.6326216, 79.5415119,
         travel_date="2026-09-15"
     )
-    print("Tirupati flies to (on 2026-09-15):", destinations)
+    print("Tirupati flies to (on 2026-09-15):", destinations, "| data ok:", ok)

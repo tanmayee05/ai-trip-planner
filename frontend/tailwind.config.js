@@ -4,41 +4,47 @@ export default {
   theme: {
     extend: {
       colors: {
-        // page + surfaces
-        cream: "#F4F1FF", // soft lavender-white (kept the name; it's the app bg)
+        /* ---------------------------------------------------------------
+         * "Golden Hour Voyage" — a travel palette.
+         * Midnight navy (night flights, departure boards) grounds warm
+         * map-paper cream. Ocean azure leads, lagoon turquoise supports,
+         * sunset coral + brass gold carry the golden-hour warmth.
+         * ------------------------------------------------------------- */
+        cream: "#F6F2EB", // warm map paper
         paper: "#FFFFFF",
+        sand: "#EFE7DA", // aged chart edge
         ink: {
-          DEFAULT: "#241C46", // deep indigo-black
-          soft: "#5A5182",
-          faint: "#9C96BC",
+          DEFAULT: "#0E1B2C", // midnight navy
+          soft: "#46596F",
+          faint: "#8698AC",
         },
-        // primary — electric violet / indigo
+        // primary — deep ocean azure
         brand: {
-          50: "#F1EDFF",
-          100: "#E3DAFF",
-          200: "#C6B4FF",
-          300: "#A88DFF",
-          400: "#8B6BFF",
-          500: "#6C4CF1",
-          600: "#5A38E0",
-          700: "#4728B8",
-          800: "#341E88",
-          900: "#241663",
+          50: "#EEF6FC",
+          100: "#D8EAF7",
+          200: "#AFD3EE",
+          300: "#7EB7E0",
+          400: "#4C97CE",
+          500: "#2176AE",
+          600: "#175E8E",
+          700: "#12486D",
+          800: "#0E3652",
+          900: "#0B2839",
         },
-        // secondary — bright aqua / cyan (kept the name "teal")
+        // secondary — lagoon turquoise
         teal: {
-          100: "#CDF6FB",
-          300: "#77E4F0",
-          500: "#1FCBDE",
-          600: "#10AEC1",
-          700: "#0C8A99",
+          100: "#D6F5F0",
+          300: "#7FE3D6",
+          500: "#2EC4B6",
+          600: "#1FA396",
+          700: "#167B72",
         },
         // supporting pops
-        grape: "#B57BFF",
-        sunny: "#FFB93B",
-        sky: "#5B8DEF",
-        bubble: "#FF5C8A", // hot pink — the warm counterpoint
-        lime: "#37D98E",
+        sunny: "#E8A33D", // brass compass / sunlit sand
+        sky: "#6FA8DC", // clear horizon
+        bubble: "#F4784F", // sunset coral — the warm counterpoint
+        lime: "#3FBF8F", // jade
+        grape: "#7A6A9B", // dusk plum
       },
       fontFamily: {
         display: ['"Bricolage Grotesque"', "system-ui", "sans-serif"],
@@ -46,29 +52,36 @@ export default {
       },
       borderRadius: {
         xl: "1rem",
-        "2xl": "1.5rem",
-        "3xl": "2rem",
-        "4xl": "2.5rem",
+        "2xl": "1.25rem",
+        "3xl": "1.75rem",
+        "4xl": "2.25rem",
         blob: "42% 58% 63% 37% / 41% 44% 56% 59%",
       },
       boxShadow: {
-        chunky: "0 4px 0 0 rgba(36,28,70,0.9)",
-        "chunky-sm": "0 3px 0 0 rgba(36,28,70,0.85)",
-        "chunky-lg": "0 7px 0 0 rgba(36,28,70,0.9)",
-        pop: "0 14px 34px -10px rgba(36,28,70,0.30)",
-        soft: "0 2px 10px -2px rgba(36,28,70,0.10), 0 10px 28px -10px rgba(36,28,70,0.16)",
-        lift: "0 10px 24px -8px rgba(36,28,70,0.22), 0 24px 52px -14px rgba(36,28,70,0.24)",
-        glow: "0 0 0 4px rgba(108,76,241,0.22)",
+        /* names kept for compatibility — values are now soft & layered
+           instead of hard sticker-book offsets */
+        chunky:
+          "0 1px 2px rgba(14,27,44,0.05), 0 4px 14px -3px rgba(14,27,44,0.10)",
+        "chunky-sm":
+          "0 1px 2px rgba(14,27,44,0.06), 0 2px 8px -2px rgba(14,27,44,0.10)",
+        "chunky-lg":
+          "0 2px 4px rgba(14,27,44,0.06), 0 16px 34px -10px rgba(14,27,44,0.18)",
+        pop: "0 18px 44px -14px rgba(14,27,44,0.30)",
+        soft: "0 1px 2px rgba(14,27,44,0.05), 0 8px 24px -10px rgba(14,27,44,0.14)",
+        lift: "0 10px 28px -10px rgba(14,27,44,0.24), 0 30px 60px -20px rgba(14,27,44,0.22)",
+        glow: "0 0 0 4px rgba(33,118,174,0.18)",
+        inset: "inset 0 1px 0 0 rgba(255,255,255,0.6)",
       },
       backgroundImage: {
-        "brand-gradient": "linear-gradient(135deg, #8B6BFF 0%, #6C4CF1 50%, #4728B8 100%)",
-        // "sunset" name kept — now a full aurora sweep
-        "sunset":
-          "linear-gradient(120deg, #1FCBDE 0%, #6C4CF1 38%, #FF5C8A 72%, #FFB93B 100%)",
-        "mint": "linear-gradient(135deg, #77E4F0, #1FCBDE 60%, #10AEC1)",
-        "dawn": "linear-gradient(160deg, #FF5C8A, #8B6BFF 60%, #5B8DEF)",
-        "mesh":
-          "radial-gradient(at 6% 10%, rgba(108,76,241,0.28) 0px, transparent 44%), radial-gradient(at 92% 4%, rgba(255,92,138,0.24) 0px, transparent 42%), radial-gradient(at 82% 94%, rgba(31,203,222,0.26) 0px, transparent 46%), radial-gradient(at 14% 92%, rgba(255,185,59,0.20) 0px, transparent 44%)",
+        "brand-gradient": "linear-gradient(135deg, #4C97CE 0%, #2176AE 55%, #12486D 100%)",
+        // golden hour: night -> dusk -> sunset -> gold
+        sunset:
+          "linear-gradient(120deg, #12486D 0%, #2176AE 26%, #7A6A9B 52%, #F4784F 80%, #E8A33D 100%)",
+        ocean: "linear-gradient(135deg, #7FE3D6 0%, #2EC4B6 45%, #167B72 100%)",
+        dawn: "linear-gradient(160deg, #F4784F 0%, #E8A33D 55%, #7FE3D6 100%)",
+        dusk: "linear-gradient(135deg, #0E1B2C 0%, #12486D 50%, #7A6A9B 100%)",
+        mesh:
+          "radial-gradient(at 4% 8%, rgba(33,118,174,0.20) 0px, transparent 46%), radial-gradient(at 94% 2%, rgba(244,120,79,0.16) 0px, transparent 44%), radial-gradient(at 84% 92%, rgba(46,196,182,0.18) 0px, transparent 48%), radial-gradient(at 12% 94%, rgba(232,163,61,0.14) 0px, transparent 46%)",
       },
       keyframes: {
         "float-slow": {
@@ -76,7 +89,7 @@ export default {
           "50%": { transform: "translateY(-20px) rotate(6deg)" },
         },
         "pop-in": {
-          "0%": { opacity: "0", transform: "scale(0.9) translateY(10px)" },
+          "0%": { opacity: "0", transform: "scale(0.96) translateY(10px)" },
           "100%": { opacity: "1", transform: "scale(1) translateY(0)" },
         },
         shimmer: { "100%": { transform: "translateX(100%)" } },
@@ -100,16 +113,49 @@ export default {
         },
         twinkle: {
           "0%,100%": { opacity: "0.15", transform: "scale(0.7)" },
-          "50%": { opacity: "1", transform: "scale(1.25)" },
+          "50%": { opacity: "1", transform: "scale(1.2)" },
+        },
+        /* ---- new, travel-flavoured ---- */
+        "gradient-pan": {
+          "0%,100%": { backgroundPosition: "0% 50%" },
+          "50%": { backgroundPosition: "100% 50%" },
+        },
+        drift: {
+          "0%": { transform: "translateX(-8%)" },
+          "100%": { transform: "translateX(108%)" },
+        },
+        "spin-slow": {
+          "0%": { transform: "rotate(0deg)" },
+          "100%": { transform: "rotate(360deg)" },
+        },
+        "dash-flow": { "100%": { strokeDashoffset: "-120" } },
+        rise: {
+          "0%": { opacity: "0", transform: "translateY(14px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+        "pulse-ring": {
+          "0%": { transform: "scale(0.85)", opacity: "0.55" },
+          "100%": { transform: "scale(1.9)", opacity: "0" },
+        },
+        sheen: {
+          "0%": { transform: "translateX(-120%) skewX(-18deg)" },
+          "60%,100%": { transform: "translateX(220%) skewX(-18deg)" },
         },
       },
       animation: {
         "float-slow": "float-slow 9s ease-in-out infinite",
-        "pop-in": "pop-in 0.4s cubic-bezier(0.22,1,0.36,1) both",
+        "pop-in": "pop-in 0.45s cubic-bezier(0.22,1,0.36,1) both",
         shimmer: "shimmer 1.6s infinite",
         "bounce-sm": "bounce-sm 1.8s ease-in-out infinite",
-        "blob-morph": "blob-morph 20s ease-in-out infinite",
+        "blob-morph": "blob-morph 22s ease-in-out infinite",
         twinkle: "twinkle 3.4s ease-in-out infinite",
+        "gradient-pan": "gradient-pan 14s ease infinite",
+        drift: "drift 42s linear infinite",
+        "spin-slow": "spin-slow 26s linear infinite",
+        "dash-flow": "dash-flow 2.4s linear infinite",
+        rise: "rise 0.5s cubic-bezier(0.22,1,0.36,1) both",
+        "pulse-ring": "pulse-ring 2.4s cubic-bezier(0.22,1,0.36,1) infinite",
+        sheen: "sheen 4.5s ease-in-out infinite",
       },
     },
   },
