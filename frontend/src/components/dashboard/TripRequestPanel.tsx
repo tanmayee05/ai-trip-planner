@@ -6,6 +6,7 @@ import type { PlanInput, TravelMode } from "@/api/plan";
 import { TripRequestForm } from "@/components/dashboard/TripRequestForm";
 import { TripChat } from "@/components/dashboard/TripChat";
 import { todayISO } from "@/lib/format";
+import { classifyChange, nextActionLabel } from "@/lib/planDiff";
 import { cn } from "@/lib/cn";
 
 type Tab = "form" | "chat";
@@ -34,9 +35,15 @@ interface Props {
   /** a plan is already on screen — the chat is now for changes, so it stops
    *  driving itself to the next step and offers a re-plan instead */
   planned?: boolean;
+  /** the input behind the plan currently on screen, so the button can say
+   *  what pressing it will actually do to that plan */
+  plannedInput?: PlanInput | null;
 }
 
-export function TripRequestPanel({ onSubmit, busy = false, initial, onCollapse, chatSessionId, onChatSessionId, planned = false }: Props) {
+export function TripRequestPanel({
+  onSubmit, busy = false, initial, onCollapse, chatSessionId, onChatSessionId,
+  planned = false, plannedInput = null,
+}: Props) {
   const [tab, setTab] = useState<Tab>("form");
 
   const [draft, setDraft] = useState<TripDraft>(() => ({
@@ -80,6 +87,12 @@ export function TripRequestPanel({ onSubmit, busy = false, initial, onCollapse, 
     onChatSessionId(null); // drop the transcript too — a new trip, a new chat
     setResetKey((k) => k + 1);
   }
+
+  // Same classifier the page acts on, so the wording and the behaviour can't
+  // drift apart: whatever this button says is what pressing it does.
+  const nextLabel = planInput && plannedInput
+    ? nextActionLabel(classifyChange(plannedInput, planInput))
+    : "Next: choose stops";
 
   return (
     <div className="card p-5 sm:p-6">
@@ -143,7 +156,14 @@ export function TripRequestPanel({ onSubmit, busy = false, initial, onCollapse, 
       </div>
 
       {tab === "form" ? (
-        <TripRequestForm draft={draft} patch={patch} onNext={next} canNext={!!planInput} busy={busy} />
+        <TripRequestForm
+          draft={draft}
+          patch={patch}
+          onNext={next}
+          canNext={!!planInput}
+          busy={busy}
+          nextLabel={nextLabel}
+        />
       ) : (
         <TripChat
           key={resetKey}

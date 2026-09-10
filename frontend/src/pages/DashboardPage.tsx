@@ -24,6 +24,10 @@ import { Companion } from "@/components/decor/Companion";
 import { Confetti } from "@/components/common/Confetti";
 import { usePlanJob } from "@/hooks/usePlanJob";
 import { prettyDate, todayISO } from "@/lib/format";
+import { classifyChange } from "@/lib/planDiff";
+import { recostPlan } from "@/api/plan";
+import { apiErrorMessage } from "@/lib/api";
+import toast from "react-hot-toast";
 import type { PlanInput, PlanStop } from "@/api/plan";
 import type { PlanJob, RouteMarker, TripDetail } from "@/types/api";
 
@@ -45,6 +49,10 @@ export function DashboardPage() {
   const [pickedNames, setPickedNames] = useState<string[]>([]);
   // the full last-submitted input — re-seeds the form so you can tweak & re-plan
   const [lastInput, setLastInput] = useState<PlanInput | null>(null);
+  // the input that produced the plan CURRENTLY on screen. `lastInput` follows
+  // the form as it's edited; this one doesn't move until a plan actually runs,
+  // so comparing the two is what tells us whether the plan has gone stale.
+  const [plannedInput, setPlannedInput] = useState<PlanInput | null>(null);
 
   const [routeMarkers, setRouteMarkers] = useState<RouteMarker[]>([]);
 
@@ -124,17 +132,80 @@ export function DashboardPage() {
     wasRunning.current = plan.phase === "running";
   }, [plan.phase]);
 
-  /** Form "Next", or the chat once it has every answer: move on to fetching
-   *  the places for this destination. The trip panel stays exactly where it
-   *  is — this step adds the picker on the right, it doesn't replace the
-   *  form with something else. */
+  /** Form "Next", or the chat once it has every answer.
+   *
+   *  What this does depends on what actually changed, because editing a field
+   *  and being handed back the SAME plan is wrong — the plan no longer matches
+   *  its own inputs. See lib/planDiff.ts for the rule; in short:
+   *
+   *    destination moved  -> the chosen stops aren't in this trip any more,
+   *                          so go back to the picker
+   *    source/days/mode   -> stops still stand, but the route, the day split
+   *    (or date, on public  and the timetable answers are all stale: re-plan
+   *     transport)          immediately with the stops already chosen
+   *    people only        -> the plan is untouched; only the per-head budget
+   *    (or date, driving)   moves, so re-cost in place and keep the plan
+   */
   function handleDetails(values: PlanInput) {
-    // a new destination invalidates the old stop list; changing days/people
-    // or the date does not, so don't throw the user's picks away for those
-    if (values.destination !== lastInput?.destination) setPickedNames([]);
-    setDraft(values);
     setPlanOpen(true);
     setLastInput(values);
+
+    // Already choosing stops for a trip that hasn't been planned yet? Then this
+    // edit belongs to that pending trip. Carry it in and stay in the picker —
+    // classifying it against the PREVIOUS plan would decide the edit was
+    // cosmetic and drop the traveller out of the step they were in the middle of.
+    if (draft) {
+      if (values.destination !== draft.destination) setPickedNames([]);
+      setDraft(values);
+      return;
+    }
+
+    const change = classifyChange(plannedInput, values);
+
+    if (change === "restops") {
+      if (values.destination !== plannedInput?.destination) setPickedNames([]);
+      setDraft(values); // -> AttractionPicker
+      return;
+    }
+
+    if (change === "replan") {
+      const stops = plannedInput?.stops ?? [];
+      setRouteMarkers([]);
+      setPlannedInput({ ...values, stops });
+      plan.run({ ...values, stops, chat_session_id: chatSessionId });
+      setDraft(null);
+      return;
+    }
+
+    if (change === "cosmetic") {
+      applyCosmeticChange(values);
+      return;
+    }
+
+    toast("Nothing changed — your plan is already up to date.");
+  }
+
+  /** An input the plan doesn't depend on. Keep the plan, move the budget. */
+  async function applyCosmeticChange(values: PlanInput) {
+    const stops = plannedInput?.stops ?? [];
+    setPlannedInput({ ...values, stops });
+    setDraft(null);
+
+    const current = plan.job?.result;
+    if (!current || !values.num_days || !values.num_people) return;
+
+    try {
+      const costs = await recostPlan({
+        num_days: values.num_days,
+        num_people: values.num_people,
+        travel_mode: values.travel_mode,
+        result: current,
+      });
+      plan.patchResult({ costs });
+      toast.success("Details updated — budget recalculated, no re-planning needed.");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't update the budget."));
+    }
   }
 
   function handlePlan(stops: PlanStop[]) {
@@ -142,6 +213,7 @@ export function DashboardPage() {
     setPickedNames(stops.map((s) => s.name));
     const full = { ...draft, stops };
     setLastInput(full);
+    setPlannedInput(full); // this is the input the resulting plan belongs to
     setRouteMarkers([]); // clear route pins from the previous plan
     // hand the chat transcript id along so, if this trip gets saved, History
     // can restore the same conversation later instead of starting a blank one
@@ -160,6 +232,7 @@ export function DashboardPage() {
     plan.reset();
     setDraft(null);
     setLastInput(null);
+    setPlannedInput(null);
     setPickedNames([]);
     setRouteMarkers([]);
     setChatSessionId(null);
@@ -182,7 +255,7 @@ export function DashboardPage() {
     // Rebuild the original inputs so the form shows source / destination /
     // date / days / people / mode instead of coming back empty. days+people
     // survive in the cost assumptions; the mode is implied by result.mode.
-    setLastInput({
+    const restored: PlanInput = {
       source: t.source ?? "",
       destination: t.destination ?? "",
       travel_date: t.travel_date ?? todayISO(),
@@ -196,7 +269,12 @@ export function DashboardPage() {
         category: x.category,
         blurb: x.blurb,
       })),
-    });
+    };
+    setLastInput(restored);
+    // The restored plan belongs to these inputs, so an untouched form must read
+    // as "nothing changed" — without this, reopening a trip and pressing Next
+    // would send the traveller back to the stop picker for no reason.
+    setPlannedInput(restored);
     setPickedNames((t.result?.itinerary ?? []).map((x) => x.name));
     // restore the conversation that planned THIS trip (if it has one) instead
     // of always starting blank — older trips saved before this existed just
@@ -278,6 +356,7 @@ export function DashboardPage() {
                   chatSessionId={chatSessionId}
                   onChatSessionId={setChatSessionId}
                   planned={showingResults}
+                  plannedInput={plannedInput}
                 />
               </motion.div>
             </div>
@@ -301,7 +380,11 @@ export function DashboardPage() {
                 </p>
                 <div className="perf my-2.5" />
                 <p className="text-[11px] font-medium leading-relaxed text-ink-soft">
-                  Edit the fields above and hit <strong className="text-ink">Next</strong> to re-plan.
+                  Changing the start, destination, days{" "}
+                  {plannedInput?.travel_mode === "own_vehicle" ? "or mode" : ", date or mode"}{" "}
+                  re-plans the whole trip. Party size
+                  {plannedInput?.travel_mode === "own_vehicle" ? " or date" : ""} just updates the
+                  budget.
                   {itinerary.length > 0 && (
                     <>
                       {" "}Or{" "}

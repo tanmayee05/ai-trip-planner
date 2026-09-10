@@ -15,7 +15,7 @@ from geocoding import geocode
 from attractions import get_attractions
 from chat_reply import answer_question, looks_like_question, wants_change
 from itinerary import region_center
-from agent import run_trip_plan, plan_stages   # the LangGraph trip-planning agent
+from agent import run_trip_plan, plan_stages, estimate_costs   # the LangGraph trip-planning agent
 from enrichments import estimate_fuel, fuel_stops_along_route, enrich_food, enrich_stay
 """
 init_db(): Create database/tables if needed
@@ -350,6 +350,38 @@ def plan_status(job_id: str):
         stages_done=job.get("stages_done", []),
         partial=job.get("partial"),
     )
+
+
+# --------------------------------------------------------------------------
+# Re-cost an existing plan.
+#
+# Party size changes nothing about HOW you get there — the route, timetables and
+# stops are all identical — it only moves the per-head arithmetic. Re-running the
+# whole agent for it would cost the traveller minutes to change a 2 to a 3. This
+# recomputes just the budget from the plan already on screen, reusing the very
+# same estimate_costs() the agent uses so the two can never disagree.
+# --------------------------------------------------------------------------
+class RecostRequest(BaseModel):
+    num_days: int = Field(ge=1, le=60)
+    num_people: int = Field(ge=1, le=30)
+    travel_mode: Literal["public_transport", "own_vehicle"] = "public_transport"
+    result: dict          # the finished plan we're re-costing
+
+
+@app.post("/plan/costs")
+def recost_plan(req: RecostRequest):
+    res = req.result or {}
+    is_drive = req.travel_mode == "own_vehicle"
+    state = {
+        "travel_mode": req.travel_mode,
+        "num_days": req.num_days,
+        "num_people": req.num_people,
+        # only the fields estimate_costs actually reads
+        "transport": {"drive": res.get("drive") or {}} if is_drive else {},
+        "tolls": res.get("tolls") or {},
+        "return_transport": res.get("return") or {},
+    }
+    return estimate_costs(state)["costs"]
 
 
 # --------------------------------------------------------------------------

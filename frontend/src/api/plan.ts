@@ -1,5 +1,5 @@
 import { api } from "@/lib/api";
-import type { PlanJob } from "@/types/api";
+import type { CostBreakdown, PlanJob } from "@/types/api";
 
 export interface PlanStop {
   name: string;
@@ -25,6 +25,18 @@ export interface PlanInput {
 /** Kick off a plan. Returns immediately with a job in state "running". */
 export function startPlan(body: PlanInput) {
   return api.post<PlanJob>("/plan", body).then((r) => r.data);
+}
+
+/** Recompute just the budget for a plan already on screen. Party size doesn't
+ *  change the route, so this spares the traveller a full re-plan; the maths
+ *  stays on the server so it can't drift from the planner's own. */
+export function recostPlan(body: {
+  num_days: number;
+  num_people: number;
+  travel_mode?: TravelMode;
+  result: unknown;
+}) {
+  return api.post<CostBreakdown>("/plan/costs", body).then((r) => r.data);
 }
 
 export function getPlanJob(jobId: string) {

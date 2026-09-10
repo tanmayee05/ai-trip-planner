@@ -13,9 +13,13 @@ interface Props {
   onNext: () => void;
   canNext: boolean;
   busy?: boolean;
+  /** what pressing the button will do to the plan on screen */
+  nextLabel?: string;
 }
 
-export function TripRequestForm({ draft, patch, onNext, canNext, busy = false }: Props) {
+export function TripRequestForm({
+  draft, patch, onNext, canNext, busy = false, nextLabel = "Next: choose stops",
+}: Props) {
   const [touched, setTouched] = useState(false);
 
   const days = parseInt(draft.num_days, 10);
@@ -167,7 +171,7 @@ export function TripRequestForm({ draft, patch, onNext, canNext, busy = false }:
           disabled={busy}
           whileTap={{ scale: 0.98 }}
         >
-          Next: choose stops
+          {nextLabel}
           <ArrowRight className="h-4 w-4" />
         </motion.button>
       </form>

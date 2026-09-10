@@ -3,7 +3,7 @@ import toast from "react-hot-toast";
 
 import { startPlan, pollPlan, PlanTimeoutError, type PlanInput } from "@/api/plan";
 import { apiErrorMessage } from "@/lib/api";
-import type { PlanJob } from "@/types/api";
+import type { PlanJob, PlanResult } from "@/types/api";
 
 export type PlanPhase = "idle" | "running" | "done" | "error";
 
@@ -85,11 +85,22 @@ export function usePlanJob() {
     setState({ phase: "idle", job: null, elapsedMs: 0, errorMessage: null });
   }, []);
 
+  /** Patch fields of the result already on screen, without re-planning. Used
+   *  when an input changes that the plan doesn't depend on — the budget is
+   *  recomputed and swapped in, everything else stands. */
+  const patchResult = useCallback((patch: Partial<PlanResult>) => {
+    setState((s) =>
+      s.job?.result
+        ? { ...s, job: { ...s.job, result: { ...s.job.result, ...patch } } }
+        : s,
+    );
+  }, []);
+
   /** Drop a saved trip straight in as the current result (History → reopen). */
   const showExisting = useCallback((job: PlanJob) => {
     abortRef.current?.abort();
     setState({ phase: "done", job, elapsedMs: 0, errorMessage: null });
   }, []);
 
-  return { ...state, run, reset, showExisting };
+  return { ...state, run, reset, showExisting, patchResult };
 }
