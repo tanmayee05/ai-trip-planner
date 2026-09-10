@@ -14,6 +14,8 @@ from slot_extraction import update_slots
 from geocoding import geocode
 from attractions import get_attractions
 from chat_reply import answer_question, looks_like_question, wants_change
+from stay_prefs import detect_stay_band
+import stay_revision
 from itinerary import region_center
 from agent import run_trip_plan, plan_stages, estimate_costs   # the LangGraph trip-planning agent
 from enrichments import estimate_fuel, fuel_stops_along_route, enrich_food, enrich_stay
@@ -485,6 +487,18 @@ class ChatRequest(BaseModel):
     # session starts blank and re-asks for a source the user can plainly see
     # filled in on screen.
     known: dict | None = None
+    # The plan on screen, if there is one. Sent so a request like "recommend
+    # premium stays" can be OFFERED against the real itinerary instead of just
+    # answered in the abstract.
+    itinerary: list[dict] | None = None
+    itinerary_stays: list[dict] | None = None
+
+
+class PendingAction(BaseModel):
+    """A question the assistant is waiting on before it changes the plan."""
+    kind: str                       # "stay_band"
+    question: str
+    options: list[str] = []
 
 
 class ChatResponse(BaseModel):
@@ -493,6 +507,15 @@ class ChatResponse(BaseModel):
     slots: dict
     ready_to_plan: bool
     messages: list[ChatMessage]     # full transcript so far
+    # --- plan revision, negotiated in chat ---
+    pending_action: PendingAction | None = None   # waiting on the traveller
+    stays_patch: list[dict] | None = None         # apply this to the plan on screen
+
+
+# Which chat sessions are mid-negotiation about their stays, and about what.
+# In-memory, like _PLAN_JOBS — a restart drops the pending question and the
+# traveller just asks again.
+_PENDING_STAY_BAND: dict[str, str] = {}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -521,6 +544,37 @@ def chat(req: ChatRequest):
     if supplied:
         slots = slots.model_copy(update=supplied)
 
+    # ------------------------------------------------------------------
+    # Mid-negotiation about stays? Then this message is the ANSWER to that
+    # question, not a trip detail — running slot extraction on "just day 2"
+    # would have it read as a travel date. Resume the graph instead.
+    # ------------------------------------------------------------------
+    if session_id in _PENDING_STAY_BAND:
+        outcome = stay_revision.resume(session_id, req.message)
+        pending = outcome.get("pending")
+        if pending:
+            reply = pending["question"]          # answer was unclear; ask again
+        else:
+            _PENDING_STAY_BAND.pop(session_id, None)
+            reply = outcome["message"]
+
+        messages.append({"role": "user", "text": req.message})
+        messages.append({"role": "assistant", "text": reply})
+        save_session(session_id, slots, last_question, messages)
+        return ChatResponse(
+            session_id=session_id,
+            reply=reply,
+            slots=slots.model_dump(),
+            ready_to_plan=next_question(slots, PLANNER_FIELDS, conditional=False) is None,
+            messages=[ChatMessage(**m) for m in messages],
+            pending_action=(
+                PendingAction(kind=pending["kind"], question=pending["question"],
+                              options=pending["options"])
+                if pending else None
+            ),
+            stays_patch=outcome.get("stays"),
+        )
+
     asking = looks_like_question(req.message)
 
     # Everything we already know going in — from the form OR learned earlier in
@@ -530,7 +584,16 @@ def chat(req: ChatRequest):
     # change, still update slots normally.
     established = slots.model_dump(exclude_none=True)
 
-    slots = update_slots(slots, req.message, last_question)
+    try:
+        slots = update_slots(slots, req.message, last_question)
+    except Exception as e:  # noqa: BLE001
+        # A transient LLM/network failure must not take the whole conversation
+        # down with a 500 — seen in testing as an httpx RemoteProtocolError
+        # mid-extraction. Keep the slots we already had and carry on; the
+        # traveller can restate anything that didn't land. (slot_extraction
+        # keeps its fail-loud contract for the CLI; it's the web chat that has
+        # to degrade.)
+        print(f"slot extraction failed, keeping known slots: {type(e).__name__}: {e}")
 
     if asking and established and not wants_change(req.message):
         slots = slots.model_copy(update=established)
@@ -550,6 +613,29 @@ def chat(req: ChatRequest):
     if reply is None:
         reply = question if question else "Great, I have everything I need!"
 
+    # ------------------------------------------------------------------
+    # Asked about stays in a particular price band, with a plan on screen?
+    # Answer as usual, then OFFER to put them in — and stop there. The plan is
+    # not touched until the traveller says where, because silently replacing
+    # every night's hotel when they only wanted a suggestion is worse than
+    # doing nothing. stay_revision holds the pause (LangGraph `interrupt()`).
+    # ------------------------------------------------------------------
+    pending_action = None
+    band = detect_stay_band(req.message)
+    if band and req.itinerary:
+        offer = stay_revision.propose(
+            session_id, band, req.itinerary, req.itinerary_stays or []
+        )
+        if offer:
+            _PENDING_STAY_BAND[session_id] = band
+            reply = reply + "\n\n" + offer["question"]
+            pending_action = PendingAction(
+                kind=offer["kind"], question=offer["question"], options=offer["options"]
+            )
+            # the follow-up now owns the conversation, so don't also leave a
+            # slot question hanging as the extraction context
+            question = None
+
     # the pending slot question stays the extraction context for the next turn,
     # even when we wrapped it inside a longer answer
     last_question = question
@@ -564,6 +650,7 @@ def chat(req: ChatRequest):
         slots=slots.model_dump(),
         ready_to_plan=ready,
         messages=[ChatMessage(**m) for m in messages],
+        pending_action=pending_action,
     )
 
 

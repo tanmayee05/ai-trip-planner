@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { SendHorizonal, Sparkles, Loader2, ArrowRight, Check, CircleDashed } from "lucide-react";
+import { SendHorizonal, Sparkles, Loader2, Check, CircleDashed } from "lucide-react";
 import toast from "react-hot-toast";
 
 import { sendChat, getChatHistory } from "@/api/chat";
 import type { TripDraft } from "@/components/dashboard/TripRequestPanel";
 import type { TravelMode } from "@/api/plan";
-import type { TripSlots } from "@/types/api";
+import type { ItineraryStayFood, ItineraryStop, PendingAction, TripSlots } from "@/types/api";
 import { apiErrorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -49,13 +49,19 @@ interface Props {
    *  applied, because the `draft` prop is still the pre-patch one on the tick
    *  a reply lands — the panel merges it before building the planner input. */
   onNext: (override?: Partial<TripDraft>) => void;
-  canNext: boolean;
   busy?: boolean;
   sessionId: string | null;
   onSessionId: (id: string | null) => void;
-  /** a plan is already on screen: the chat stops driving itself forward and
-   *  offers an explicit re-plan instead of restarting the flow under the user */
+  /** a plan is already on screen: the chat stops driving itself forward, so
+   *  asking a question here can't restart the flow under the traveller.
+   *  Re-planning is the form's job. */
   planned?: boolean;
+  /** the plan on screen — sent with each turn so the assistant can offer to
+   *  change it (e.g. "recommend premium stays") instead of only talking about it */
+  itinerary?: ItineraryStop[];
+  itineraryStays?: ItineraryStayFood[];
+  /** the traveller agreed to a stay change — hand the replacement to the page */
+  onStaysPatch?: (stays: ItineraryStayFood[]) => void;
 }
 
 /** Only the fields whose value genuinely differs from the shared draft. The
@@ -75,7 +81,8 @@ interface Msg {
 }
 
 export function TripChat({
-  draft, patch, onNext, canNext, busy = false, sessionId, onSessionId, planned = false,
+  draft, patch, onNext, busy = false, sessionId, onSessionId, planned = false,
+  itinerary = [], itineraryStays = [], onStaysPatch,
 }: Props) {
   // opening line adapts to whatever the Form tab may already hold
   const greeting = useMemo<Msg>(() => {
@@ -114,6 +121,9 @@ export function TripChat({
   /** the backend's own verdict on whether every slot the planner needs is
    *  filled — the chat keeps asking until this flips true */
   const [ready, setReady] = useState(false);
+
+  /** the assistant is waiting on an answer before it changes anything */
+  const [pending, setPending] = useState<PendingAction | null>(null);
 
   /** has this conversation already pushed the flow on to fetching places?
    *  Starts true when a plan is already on screen, so re-opening the chat to
@@ -156,22 +166,30 @@ export function TripChat({
     ta.style.height = Math.min(ta.scrollHeight, 140) + "px";
   }, [input]);
 
-  async function send() {
-    const text = input.trim();
+  async function send(override?: string) {
+    const text = (override ?? input).trim();
     if (!text || sending || busy) return;
 
     setTurns((t) => [...t, { role: "user", text }]); // optimistic
-    setInput("");
+    if (!override) setInput("");
     setSending(true);
     try {
       const res = await sendChat({
         session_id: sessionId,
         message: text,
         known: draftToKnown(draft),
+        // only meaningful once a plan exists; the backend ignores it otherwise
+        itinerary,
+        itinerary_stays: itineraryStays,
       });
       onSessionId(res.session_id);
       setTurns(res.messages); // authoritative transcript from the backend
       setReady(res.ready_to_plan);
+
+      // The assistant is waiting on a decision before it touches the plan.
+      setPending(res.pending_action ?? null);
+      // ...and this is the change the traveller agreed to.
+      if (res.stays_patch) onStaysPatch?.(res.stays_patch);
 
       const p = changedFields(draft, slotsToDraftPatch(res.slots));
       if (Object.keys(p).length) patch(p);
@@ -289,17 +307,44 @@ export function TripChat({
                 ))}
               </div>
 
-              {/* Once a plan exists the chat stops driving the flow on its own —
-                  a change is only applied when the traveller asks for it. */}
-              {planned && (
+              {/* No re-plan button here. Re-planning belongs to the form's
+                  Next, which now decides for itself whether a change is
+                  material (see lib/planDiff.ts) — a second, blunter trigger
+                  sitting in the middle of a conversation about hotels was
+                  just an invitation to redo the whole trip by accident. */}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* The assistant has asked how far to apply a change and is holding the
+          plan until it hears back. One tap answers it — typing works just as
+          well, but the options make the scope unmistakable, which matters
+          when the alternative is rewriting the wrong night's hotel. */}
+      <AnimatePresence>
+        {pending && !sending && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mt-2 overflow-hidden"
+          >
+            <div className="flex flex-wrap gap-1.5">
+              {pending.options.map((opt) => (
                 <button
-                  className="btn-primary mt-2.5 w-full !py-2"
-                  disabled={busy || !canNext}
-                  onClick={() => onNext()}
+                  key={opt}
+                  disabled={busy || sending}
+                  onClick={() => send(opt)}
+                  className={cn(
+                    "rounded-full border px-3 py-1.5 text-xs font-bold transition disabled:opacity-40",
+                    opt.toLowerCase().startsWith("no")
+                      ? "border-ink/10 text-ink-soft hover:border-ink/25 hover:text-ink"
+                      : "border-brand-300 bg-brand-50 text-brand-700 hover:bg-brand-100",
+                  )}
                 >
-                  Re-plan with these changes <ArrowRight className="h-4 w-4" />
+                  {opt}
                 </button>
-              )}
+              ))}
             </div>
           </motion.div>
         )}
@@ -316,8 +361,10 @@ export function TripChat({
           disabled={busy}
           className="max-h-[140px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-ink outline-none placeholder:text-ink-faint"
         />
+        {/* `() => send()`, not `send`: send() now takes an optional message,
+            and React would otherwise hand it the click event as that argument */}
         <button
-          onClick={send}
+          onClick={() => send()}
           disabled={!input.trim() || sending || busy}
           className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-500 text-white transition hover:bg-brand-600 disabled:opacity-40"
           aria-label="Send"

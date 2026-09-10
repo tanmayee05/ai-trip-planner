@@ -29,12 +29,24 @@ export interface ChatMessage {
   text: string;
 }
 
+/** A question the assistant is waiting on before it will change the plan. */
+export interface PendingAction {
+  kind: string; // "stay_band"
+  question: string;
+  options: string[];
+}
+
 export interface ChatResponse {
   session_id: string;
   reply: string;
   slots: TripSlots;
   ready_to_plan: boolean;
   messages: ChatMessage[]; // full transcript persisted on the backend
+  /** set while the assistant is waiting for the traveller to say how far to
+   *  apply a change — nothing has been altered yet */
+  pending_action?: PendingAction | null;
+  /** the agreed replacement for the plan's overnight stays */
+  stays_patch?: ItineraryStayFood[] | null;
 }
 
 export interface AuthResponse {

@@ -18,8 +18,20 @@ export function sendChat(body: {
   session_id?: string | null;
   message: string;
   known?: KnownSlots;
+  /** the plan on screen, so a request like "recommend premium stays" can be
+   *  offered against the real itinerary rather than answered in the abstract */
+  itinerary?: unknown[];
+  itinerary_stays?: unknown[];
 }) {
-  return api.post<ChatResponse>("/chat", body).then((r) => r.data);
+  // A plain reply is quick, but a turn that APPLIES a change (e.g. agreeing to
+  // premium stays) re-picks hotels: one Gemini call plus several Nominatim
+  // lookups that are throttled to ~1/second. Measured at ~20s on a warm cache
+  // and well past the 25s default on a cold city — which surfaced as
+  // "The request timed out" even though the server had finished the work.
+  // Matches the allowance /plan/enrich already gets for the same kind of work.
+  return api
+    .post<ChatResponse>("/chat", body, { timeout: 180_000 })
+    .then((r) => r.data);
 }
 
 /** Rehydrate a saved conversation (transcript + slots) by its session_id. */

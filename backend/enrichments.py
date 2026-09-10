@@ -461,6 +461,68 @@ def _hotels_at(anchor: list[float], town: str, ask_text: str) -> list[dict]:
     return options
 
 
+# What to ask for, per band. The nightly figures mirror STAY_BANDS so the
+# prompt and the price hint the UI shows can't tell the traveller two
+# different stories.
+_BAND_ASK = {
+    "budget": (f"clean, safe BUDGET hotels or lodges — around Rs {STAY_BANDS['budget']}/night "
+               f"or less"),
+    "mid": (f"comfortable MID-RANGE hotels — around Rs {STAY_BANDS['mid']}/night"),
+    "premium": (f"PREMIUM hotels or resorts — around Rs {STAY_BANDS['premium']}/night or above"),
+}
+
+
+def stays_for_days(itinerary: list[dict], band: str, days: list[int]) -> list[dict]:
+    """Re-pick the overnight hotels for specific days in a specific price band.
+
+    Returns `[{day, anchor, town, stay}]` for the days asked for — food is
+    deliberately left out, because the traveller asked to change where they
+    sleep, not where they eat. The caller merges these over the existing
+    entries and keeps the food it already has.
+    """
+    if not itinerary or band not in _BAND_ASK:
+        return []
+
+    by_day: dict[int, list[dict]] = {}
+    for s in itinerary:
+        by_day.setdefault(s["day"], []).append(s)
+
+    deadline = time.monotonic() + STAYS_BUDGET_S
+    out: list[dict] = []
+    for day in days:
+        if day not in by_day:
+            continue
+        anchor_stop = by_day[day][-1]
+        anchor = [anchor_stop["lat"], anchor_stop["lon"]]
+
+        if time.monotonic() > deadline:
+            out.append({"day": day, "anchor": anchor_stop["name"], "town": None,
+                        "stay": [], "skipped": True})
+            continue
+
+        try:
+            town = _town_at(anchor[0], anchor[1])
+            ask = (
+                f"In or near {town}, India — name 3 real {_BAND_ASK[band]}, good for an "
+                f"overnight halt on a sightseeing trip (safe, well-reviewed, reasonably "
+                f"close to the sights). "
+            )
+            picks = _hotels_at(anchor, town, ask)
+        except Exception as e:  # noqa: BLE001 — one bad night, not a bad request
+            print(f"band stay lookup failed for day {day}: {type(e).__name__}: {e}")
+            out.append({"day": day, "anchor": anchor_stop["name"], "town": None,
+                        "stay": [], "skipped": True})
+            continue
+
+        # The model labels each hotel's own band. Prefer the ones that actually
+        # match what was asked for, but never hand back an empty list just
+        # because the labels disagree with the prompt.
+        on_band = [h for h in picks if h.get("band") == band]
+        out.append({"day": day, "anchor": anchor_stop["name"], "town": town,
+                    "stay": on_band or picks})
+    return out
+
+
 def enrich_stay(geometry: list[list[float]], radius_km: float = 150,
                 note: str | None = None,
                 src: dict | None = None, dst: dict | None = None) -> dict:

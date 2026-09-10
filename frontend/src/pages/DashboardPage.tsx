@@ -357,6 +357,9 @@ export function DashboardPage() {
                   onChatSessionId={setChatSessionId}
                   planned={showingResults}
                   plannedInput={plannedInput}
+                  itinerary={itinerary}
+                  itineraryStays={result?.itinerary_stays ?? []}
+                  onStaysPatch={(stays) => plan.patchResult({ itinerary_stays: stays })}
                 />
               </motion.div>
             </div>

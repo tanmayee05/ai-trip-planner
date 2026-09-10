@@ -101,6 +101,15 @@ has **Log out**.
 - **A plan never fails as a whole any more.** Every stage degrades on its own:
   if a provider is rate-limited or down, that one section says so and the rest
   of the plan (itinerary, map, budget, the other transport modes) still shows.
+- **Stay changes are negotiated, not assumed.** Ask in chat for budget /
+  mid-range / premium stays once a plan exists and the assistant answers as
+  usual, then asks whether to apply it to the whole trip, one day, or not at
+  all — and changes nothing until you say. That pause is a real LangGraph
+  `interrupt()` in `stay_revision.py`, checkpointed under the chat session id,
+  so it survives the gap between two HTTP requests. An answer it can't read
+  loops back to the question rather than guessing (`_MAX_ASKS` = 3), because
+  rewriting the wrong night's hotel is worse than asking again. Food picks for
+  the affected nights, and every night not named, are preserved.
 - **Unroutable stops are handled.** ORS is called through its POST
   `/geojson` endpoint with `radiuses: [-1, -1]`. The GET form snaps each
   endpoint to a road within 350 m and returns `404 Could not find routable

@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { SlidersHorizontal, MessagesSquare, RefreshCw, Minimize2 } from "lucide-react";
 
 import type { PlanInput, TravelMode } from "@/api/plan";
+import type { ItineraryStayFood, ItineraryStop } from "@/types/api";
 import { TripRequestForm } from "@/components/dashboard/TripRequestForm";
 import { TripChat } from "@/components/dashboard/TripChat";
 import { todayISO } from "@/lib/format";
@@ -38,11 +39,16 @@ interface Props {
   /** the input behind the plan currently on screen, so the button can say
    *  what pressing it will actually do to that plan */
   plannedInput?: PlanInput | null;
+  /** the plan on screen, for chat-driven changes to it */
+  itinerary?: ItineraryStop[];
+  itineraryStays?: ItineraryStayFood[];
+  onStaysPatch?: (stays: ItineraryStayFood[]) => void;
 }
 
 export function TripRequestPanel({
   onSubmit, busy = false, initial, onCollapse, chatSessionId, onChatSessionId,
   planned = false, plannedInput = null,
+  itinerary = [], itineraryStays = [], onStaysPatch,
 }: Props) {
   const [tab, setTab] = useState<Tab>("form");
 
@@ -170,11 +176,13 @@ export function TripRequestPanel({
           draft={draft}
           patch={patch}
           onNext={next}
-          canNext={!!planInput}
           busy={busy}
           sessionId={chatSessionId}
           onSessionId={onChatSessionId}
           planned={planned}
+          itinerary={itinerary}
+          itineraryStays={itineraryStays}
+          onStaysPatch={onStaysPatch}
         />
       )}
     </div>
