@@ -37,7 +37,14 @@ from pydantic import BaseModel, Field
 from connectivity import check_all_modes
 from distance import straight_line_distance_km
 from enrichments import toll_plazas_along_route, stays_and_food_for_itinerary
-from itinerary import build_itinerary  # deterministic fallback
+from itinerary import order_stops
+from narrative import build_narrative
+from speciality import get_specialities
+from feasibility import (
+    assess as assess_days, day_budget, day_load, pack_days, split_by_what_fits,
+    travel_hours, visit_hours,
+    OVERRUN_TOLERANCE,
+)
 from routing import get_driving_route, get_driving_route_with_geometry
 
 load_dotenv()
@@ -66,6 +73,9 @@ class TripState(TypedDict, total=False):
     stops: list[dict]                # [{name, lat, lon, category, blurb, ...}] — [] = point-to-point
 
     # --- itinerary reasoning ---
+    feasibility: dict                # is num_days sensible for these places?
+    deferred: list[dict]             # places that don't fit the days available
+    specialities: dict               # what the destination is famous for
     itinerary: list[dict]            # flat, ordered, day-numbered  [{day, name, lat, lon, ...}]
     itinerary_notes: list[dict]      # [{day, rationale}] — the "why this day" text
     itinerary_error: str             # last validation failure, fed back into the re-prompt
@@ -104,13 +114,27 @@ _planner = _llm.with_structured_output(_ItineraryPlan)
 
 _SYSTEM = (
     "You are an India travel planner. You lay out a practical day-by-day route "
-    "through a set of places. Rules you MUST follow:\n"
+    "through a set of places, the way an experienced local guide would.\n"
+    "\n"
+    "You will be told, for each place, how many hours a visit really takes and "
+    "how far it is from the others in DRIVING HOURS. Plan against those numbers "
+    "- a day that looks balanced on paper but needs 13 hours of driving and "
+    "sightseeing is a bad plan.\n"
+    "\n"
+    "Rules you MUST follow:\n"
     "- use EVERY place exactly once; do not invent or drop places\n"
     "- day numbers are 1,2,3,... with no gaps, and never more than the trip length\n"
-    "- group places that are geographically close on the same day; minimise backtracking\n"
-    "- the arrival day is lighter (fewer places, closest to the entry point)\n"
-    "- a place far from the rest gets its own day for the transfer + a short evening stop\n"
-    "- for wildlife parks / sunrise viewpoints, note in the rationale that it is a morning-first activity"
+    "- KEEP EACH DAY WITHIN ITS HOUR BUDGET. Count the visit hours of its places "
+    "PLUS the driving between them PLUS the drive in from where the previous "
+    "night was spent (you sleep near the last place of the day)\n"
+    "- do NOT spread places thinly just to fill the days. Fewer, fuller days "
+    "with real rest beat every day half-used\n"
+    "- group places that are close together; never zig-zag back to a region "
+    "you have already left\n"
+    "- the arrival day is short - most of it goes on getting there\n"
+    "- a place far from the rest earns its own day for the transfer\n"
+    "- wildlife parks and sunrise viewpoints are MORNING-FIRST: put them at "
+    "the start of their day and say so in the rationale"
 )
 
 
@@ -140,15 +164,25 @@ def _prompt(state: TripState) -> str:
     lines = []
     for s in stops:
         d_from_src = round(straight_line_distance_km(src["lat"], src["lon"], s["lat"], s["lon"]))
+        # nearest others in DRIVING HOURS, which is what actually constrains a
+        # day. Kilometres alone don't tell the model what fits in an afternoon.
         near = sorted(
-            ((round(straight_line_distance_km(s["lat"], s["lon"], o["lat"], o["lon"])), o["name"])
-             for o in stops if o["name"] != s["name"]),
+            (
+                (travel_hours(s, o), o["name"])
+                for o in stops
+                if o["name"] != s["name"]
+            ),
         )[:3]
-        near_txt = ", ".join(f"{n} {km}km" for km, n in near)
+        near_txt = ", ".join(f"{n} {hrs:.1f}h" for hrs, n in near)
         lines.append(
-            f"- {s['name']} ({s.get('category', 'place')}) — {d_from_src} km from the start; "
-            f"nearest others: {near_txt or 'n/a'}"
+            f"- {s['name']} ({s.get('category', 'place')}) - needs about "
+            f"{visit_hours(s):.1f}h on site; {d_from_src} km from the start; "
+            f"nearest others by road: {near_txt or 'n/a'}"
         )
+
+    budgets = ", ".join(
+        f"day {d} = {day_budget(d, days):.1f}h" for d in range(1, min(days, 8) + 1)
+    )
 
     parts = [
         f"Trip: {state['source']} -> {state['destination']}, {days} day(s), "
@@ -157,8 +191,32 @@ def _prompt(state: TripState) -> str:
         "Places to cover:",
         *lines,
         "",
+        f"Hours available per day ({budgets}"
+        + (", later days = 9.0h" if days > 8 else "")
+        + "). Day 1 is short because you arrive; the last day is short because you leave.",
+        "",
         f"Produce a plan of at most {days} day(s).",
     ]
+
+    # If the day count doesn't fit the places, say so here too — otherwise the
+    # model quietly crams and we only reject it on the way out.
+    fit = state.get("feasibility") or {}
+    if fit.get("verdict") == "too_short" and not fit.get("deferred"):
+        parts += ["", (
+            f"NOTE: these places really want about {fit['needed_days']} days and only "
+            f"{days} are available. Don't pretend otherwise - build the most sensible "
+            f"{days}-day plan you can, group aggressively, and say in the rationale "
+            f"which days are heavy."
+        )]
+    elif fit.get("verdict") == "too_long":
+        parts += ["", (
+            f"NOTE: there is more time ({days} days) than these places need "
+            f"(about {fit['needed_days']}). Use about {fit['needed_days']} days and "
+            f"stop there - every day you do use must have at least one place in it. "
+            f"Don't stretch the places thin or leave blank days to fill the trip; "
+            f"say in the rationale that the remaining days are free."
+        )]
+
     if state.get("itinerary_error"):
         parts += ["", f"Your previous attempt was rejected: {state['itinerary_error']}. Fix it."]
     return "\n".join(parts)
@@ -185,8 +243,99 @@ def _validate(plan: _ItineraryPlan, stop_names: list[str], num_days: int | None)
     nums = [d.day for d in plan.days]
     if nums != list(range(1, len(nums) + 1)):
         return "day numbers must be 1, 2, 3, ... with no gaps or repeats"
+
+    # An empty DAY 1 is honest — on a long haul the arrival really is the day's
+    # work. An empty day anywhere else is padding: told not to spread places
+    # thinly, the model would otherwise hand back blank days to fill the trip
+    # length, which reads as a broken plan rather than a restful one.
+    last_with_stops = max((d.day for d in plan.days if d.stops), default=0)
+    for d in plan.days:
+        if d.stops or d.day == 1:
+            continue
+        # A blank day AFTER the sightseeing ends is a genuine free day, and
+        # gets labelled as one. A blank day in the MIDDLE is padding — the
+        # model stretching two places across a week of half-used days.
+        if d.day < last_with_stops:
+            return (
+                f"day {d.day} has no places in it but later days do - don't pad "
+                f"the middle of the plan with empty days"
+            )
     if num_days and len(plan.days) > num_days:
         return f"use at most {num_days} days"
+    return None
+
+
+def _fill_trip_days(notes: list[dict], flat: list[dict],
+                    num_days: int | None) -> list[dict]:
+    """Make sure every day the traveller booked appears in the plan.
+
+    Asked for 3 days with two nearby places, the planner will sensibly fit them
+    into 2 — and then day 3 was simply ABSENT, so the itinerary stopped at day 2
+    and looked truncated. A day with nothing scheduled is a real part of the
+    trip (you're still there, still eating, still heading home), so it gets an
+    entry that says so rather than disappearing.
+    """
+    if not num_days or num_days < 1:
+        return notes
+
+    have = {n["day"] for n in notes}
+    with_stops = {s["day"] for s in flat}
+    last_with_stops = max(with_stops) if with_stops else 0
+
+    out = list(notes)
+    for day in range(1, num_days + 1):
+        if day in have:
+            continue
+        if day == 1:
+            rationale = "Arrival day — getting there is the day's work."
+        elif day > last_with_stops:
+            rationale = (
+                "Nothing scheduled — a free day to take slowly, or to head back early."
+            )
+        else:
+            # a gap before the sightseeing ends shouldn't happen (validation
+            # rejects interior blanks), but label it honestly if it does
+            rationale = "Nothing scheduled for this day."
+        out.append({"day": day, "rationale": rationale})
+
+    out.sort(key=lambda n: n["day"])
+    return out
+
+
+def _practicality_error(flat: list[dict], num_days: int | None) -> str | None:
+    """Reject a day nobody could actually do.
+
+    The hour budget is the whole point of planning practically, so it has to be
+    CHECKED, not just requested in the prompt — an LLM told "keep days
+    realistic" will still hand back a day with 13 hours in it. Feeding the
+    specific day back gives the retry something concrete to fix.
+
+    Skipped when the trip is knowingly too short for its places: there we've
+    already told the model to cram, and rejecting its best effort three times
+    would only push us to the deterministic fallback.
+    """
+    if not flat:
+        return None
+    by_day: dict[int, list[dict]] = {}
+    for st in flat:
+        by_day.setdefault(st["day"], []).append(st)
+
+    total_days = num_days or max(by_day)
+    for day in sorted(by_day):
+        # A single place can't be split, so an over-long one-stop day is not a
+        # planning mistake — there is nothing to move, and the error would ask
+        # for the impossible. Munnar simply takes six hours.
+        if len(by_day[day]) < 2:
+            continue
+        base = by_day[day - 1][-1] if (day - 1) in by_day else None
+        load = day_load(by_day[day], base)
+        budget = day_budget(day, total_days)
+        if load > budget * OVERRUN_TOLERANCE:
+            names = ", ".join(x["name"] for x in by_day[day])
+            return (
+                f"day {day} needs about {load:.1f} hours ({names}) but only "
+                f"{budget:.1f} are available - move something to a lighter day"
+            )
     return None
 
 
@@ -214,6 +363,7 @@ _NODE_STAGE: dict[str, tuple[str, str]] = {
     "cluster_itinerary": ("itinerary", "Laying out your day-by-day route"),
     "fallback_itinerary": ("itinerary", "Laying out your day-by-day route"),
     "plan_stays": ("stays", "Finding food and places to stay"),
+    "find_specialities": ("specialities", "Looking up local specialities"),
     "plan_transport": ("transport", "Checking how to get there"),
     "assess_drive": ("drive", "Mapping the drive and its stops"),
     "plan_return_leg": ("return", "Planning the way back"),
@@ -228,6 +378,7 @@ def plan_stages(travel_mode: str, has_stops: bool) -> list[dict]:
     keys = ["start"]
     if has_stops:
         keys += ["itinerary", "stays"]
+    keys.append("specialities")
     keys.append("transport")
     if travel_mode == "own_vehicle":
         keys.append("drive")
@@ -248,6 +399,8 @@ def stages_done(state: TripState) -> list[str]:
         done.append("itinerary")
     if "plan_stays" in log:              # may legitimately yield an empty list
         done.append("stays")
+    if "find_specialities" in log:
+        done.append("specialities")
     if state.get("transport"):
         done.append("transport")
     if "assess_drive" in log:
@@ -263,9 +416,46 @@ def stages_done(state: TripState) -> list[str]:
 # Nodes
 # ----------------------------------------------------------------------
 def resolve(state: TripState) -> dict:
-    """Endpoints are already geocoded by the API layer. This node just marks
-    the run started (Step C will move geocoding + fuel-stop lookup here)."""
-    return {"node_log": ["resolve"], "itinerary_tries": 0}
+    """Endpoints are already geocoded by the API layer.
+
+    This is also where we work out whether the trip length is sensible for the
+    places picked — before any planning, so the itinerary prompt can be told
+    the truth ("these want 5 days, you have 3") and the traveller can be asked
+    about it rather than silently handed a plan that doesn't work.
+    """
+    src = state["source_geo"]
+    stops = state.get("stops") or []
+    fit = assess_days(stops, state.get("num_days"), src["lat"], src["lon"])
+
+    out: dict = {"node_log": ["resolve"], "itinerary_tries": 0, "feasibility": fit}
+
+    # Too many places for the days available? Plan the ones that FIT and set
+    # the rest aside. Cramming them all in produced a real 15-hour departure
+    # day that the model itself described as "extremely heavy" — which is not
+    # a plan anyone can follow, and it made the food, hotels and budget for
+    # that day wrong as well. The traveller is told what was deferred and can
+    # add days or drop places.
+    if fit.get("verdict") == "too_short":
+        fits, deferred = split_by_what_fits(
+            stops, state.get("num_days"), src["lat"], src["lon"]
+        )
+        if fits and deferred:
+            out["stops"] = fits
+            out["deferred"] = deferred
+            fit = dict(fit)
+            fit["deferred"] = [d["name"] for d in deferred]
+            fit["message"] = (
+                f"{fit['places']} places don't fit into {fit['given_days']} "
+                f"day{'s' if fit['given_days'] != 1 else ''} — at a comfortable pace "
+                f"they need about {fit['needed_days']}. I've planned the "
+                f"{len(fits)} that fit and left out "
+                + ", ".join(d["name"] for d in deferred)
+                + f". Add {fit['needed_days'] - fit['given_days']} more day"
+                + ("s" if fit["needed_days"] - fit["given_days"] != 1 else "")
+                + " to include them, or keep the shorter plan."
+            )
+            out["feasibility"] = fit
+    return out
 
 
 def cluster_itinerary(state: TripState) -> dict:
@@ -283,8 +473,20 @@ def cluster_itinerary(state: TripState) -> dict:
             return {"itinerary_tries": tries, "itinerary_error": err,
                     "node_log": [f"cluster_itinerary(try {tries}: {err[:40]})"]}
         flat, notes = _flatten(plan, state["stops"])
+
+        # A plan that doesn't fit the hours isn't a plan. This used to be
+        # skipped when the trip was "too_short", on the reasoning that we'd
+        # already asked the model to cram — which is precisely how a 15-hour
+        # day reached a real traveller. The stop list is now trimmed to what
+        # fits (see `resolve`), so this check applies always.
+        impractical = _practicality_error(flat, state.get("num_days"))
+        if impractical:
+            return {"itinerary_tries": tries, "itinerary_error": impractical,
+                    "node_log": [f"cluster_itinerary(try {tries}: {impractical[:40]})"]}
+
         return {
-            "itinerary": flat, "itinerary_notes": notes,
+            "itinerary": flat,
+            "itinerary_notes": _fill_trip_days(notes, flat, state.get("num_days")),
             "itinerary_error": "", "itinerary_tries": tries, "itinerary_fatal": False,
             "itinerary_source": "llm" if tries == 1 else "repaired",
             "node_log": [f"cluster_itinerary(ok, try {tries})"],
@@ -302,24 +504,59 @@ def cluster_itinerary(state: TripState) -> dict:
 
 
 def fallback_itinerary(state: TripState) -> dict:
-    """Deterministic nearest-neighbour split (from itinerary.py) when Gemini
-    can't produce a valid plan within the retry budget."""
+    """Deterministic plan for when Gemini can't produce a valid one in budget.
+
+    This used to divide the places evenly across the days
+    (`itinerary.split_into_days`), which is how you end up with a tiger reserve
+    and a hill station 120 km apart sharing an afternoon. It now packs days by
+    the hours they actually cost, so even the fallback is a plan a person
+    could follow.
+    """
     src = state["source_geo"]
-    flat = build_itinerary(state["stops"], src["lat"], src["lon"], state.get("num_days"))
-    days = sorted({s["day"] for s in flat})
-    notes = [{"day": d, "rationale": "Grouped by nearest-neighbour order from your start point."}
-             for d in days]
+    ordered = order_stops(state["stops"], src["lat"], src["lon"])
+    packed = pack_days(ordered, state.get("num_days"))
+
+    flat: list[dict] = []
+    notes: list[dict] = []
+    for day, group in enumerate(packed, start=1):
+        base = packed[day - 2][-1] if day > 1 else None
+        for st in group:
+            flat.append({**st, "day": day})
+        notes.append({
+            "day": day,
+            "rationale": (
+                f"About {day_load(group, base):.1f} hours with the driving included - "
+                f"grouped so the day is doable rather than evenly filled."
+            ),
+        })
     return {
-        "itinerary": flat, "itinerary_notes": notes, "itinerary_source": "fallback",
+        "itinerary": flat,
+        "itinerary_notes": _fill_trip_days(notes, flat, state.get("num_days")),
+        "itinerary_source": "fallback",
         "node_log": ["fallback_itinerary"],
     }
+
+
+def find_specialities(state: TripState) -> dict:
+    """What the destination is famous for: the food, the craft, the one thing
+    people travel for. Depends on nothing but the destination name, so it runs
+    on the fan-out alongside the itinerary and transport branches, and it's
+    cached per destination — usually free on the second trip to a region."""
+    try:
+        data = get_specialities(state.get("destination") or "")
+    except Exception as e:  # noqa: BLE001 — an extra is never worth failing over
+        print(f"speciality lookup failed: {type(e).__name__}: {e}")
+        data = {}
+    return {"specialities": data, "node_log": ["find_specialities"]}
 
 
 def plan_stays(state: TripState) -> dict:
     """Food + a hotel near where the traveller actually ends up each night —
     independent of how they got there, so it runs for both travel modes."""
     try:
-        stays = stays_and_food_for_itinerary(state.get("itinerary") or [])
+        stays = stays_and_food_for_itinerary(
+            state.get("itinerary") or [], state.get("num_days")
+        )
     except Exception:  # noqa: BLE001 — Gemini/Nominatim hiccup shouldn't sink the plan
         stays = []
     return {"itinerary_stays": stays, "node_log": ["plan_stays"]}
@@ -534,6 +771,12 @@ def estimate_costs(state: TripState) -> dict:
 
 def assemble(state: TripState) -> dict:
     result = dict(state.get("transport") or {})
+    if state.get("feasibility", {}).get("places"):
+        result["feasibility"] = state["feasibility"]
+    if state.get("deferred"):
+        result["deferred"] = state["deferred"]
+    if (state.get("specialities") or {}).get("specialities"):
+        result["specialities"] = state["specialities"]
     if state.get("itinerary"):
         result["itinerary"] = state["itinerary"]
         result["itinerary_notes"] = state.get("itinerary_notes", [])
@@ -557,6 +800,22 @@ def assemble(state: TripState) -> dict:
         result["return"] = state["return_transport"]
     if state.get("costs"):
         result["costs"] = state["costs"]
+
+    # The plan as a reader wants it: a running schedule with clock times. Built
+    # LAST so it can draw on the transport, the stays and the itinerary
+    # together, and from the same hour figures the days were packed with — so
+    # the prose can't contradict the plan it describes.
+    try:
+        result["narrative"] = build_narrative(
+            result,
+            source=state.get("source") or "",
+            destination=state.get("destination") or "",
+            travel_mode=state.get("travel_mode") or "public_transport",
+            num_days=state.get("num_days"),
+        )
+    except Exception as e:  # noqa: BLE001 — prose is a bonus, never a blocker
+        print(f"narrative build failed: {type(e).__name__}: {e}")
+        result["narrative"] = []
     return {"result": result, "node_log": ["assemble"]}
 
 
@@ -569,7 +828,10 @@ def after_resolve(state: TripState) -> list[str]:
     branch is Gemini + Nominatim bound and the transport branch is timetable +
     Overpass bound, so overlapping them cuts most of their combined wall time.
     They rejoin at plan_return_leg, which needs both."""
-    return ["cluster_itinerary", "plan_transport"] if state.get("stops") else ["plan_transport"]
+    branches = ["plan_transport", "find_specialities"]
+    if state.get("stops"):
+        branches.insert(0, "cluster_itinerary")
+    return branches
 
 
 def after_cluster(state: TripState) -> Literal["cluster_itinerary", "fallback_itinerary", "plan_stays"]:  # noqa: E501
@@ -603,6 +865,7 @@ def _build_graph():
     g.add_node("cluster_itinerary", cluster_itinerary)
     g.add_node("fallback_itinerary", fallback_itinerary)
     g.add_node("plan_stays", plan_stays)
+    g.add_node("find_specialities", find_specialities)
     g.add_node("plan_transport", plan_transport)
     g.add_node("assess_drive", assess_drive)
     # defer=True makes this a BARRIER: it waits until both branches above are
@@ -616,7 +879,7 @@ def _build_graph():
     g.add_edge(START, "resolve")
     # resolve fans out into the itinerary branch and the transport branch
     g.add_conditional_edges("resolve", after_resolve,
-                            ["cluster_itinerary", "plan_transport"])
+                            ["cluster_itinerary", "plan_transport", "find_specialities"])
     # branch A — itinerary, then the food/stay picks that depend on it
     g.add_conditional_edges("cluster_itinerary", after_cluster)
     g.add_edge("fallback_itinerary", "plan_stays")
@@ -624,6 +887,8 @@ def _build_graph():
     # branch B — transport, plus the drive assessment for own-vehicle trips
     g.add_conditional_edges("plan_transport", after_transport)
     g.add_edge("assess_drive", "plan_return_leg")
+    # rejoins at the same barrier as the other branches
+    g.add_edge("find_specialities", "plan_return_leg")
     g.add_edge("plan_return_leg", "estimate_costs")
     g.add_edge("estimate_costs", "assemble")
     g.add_edge("assemble", END)
@@ -631,6 +896,50 @@ def _build_graph():
 
 
 _GRAPH = _build_graph()
+
+
+def plan_itinerary_only(
+    *,
+    source: str,
+    destination: str,
+    travel_mode: str,
+    num_days: int | None,
+    source_geo: dict,
+    stops: list[dict],
+) -> dict:
+    """Re-plan just the day-by-day route for a changed set of stops.
+
+    Used when the traveller edits their places in chat ("also include Hampi",
+    "drop Varkala"). Only the itinerary needs redoing — the route to the region,
+    its timetables and the budget are all still valid — and rebuilding those
+    would cost minutes for a change that takes seconds.
+
+    It calls the SAME nodes the full graph uses (resolve -> cluster -> retry ->
+    fallback), so the planning rules and the hour budgets can't quietly diverge
+    between the two paths.
+    """
+    state: TripState = {
+        "source": source, "destination": destination, "travel_mode": travel_mode,
+        "num_days": num_days, "source_geo": source_geo, "stops": stops,
+        "travel_date": "", "node_log": [],
+    }
+    state.update(resolve(state))
+
+    for _ in range(MAX_ITINERARY_TRIES):
+        state.update(cluster_itinerary(state))
+        if not state.get("itinerary_error"):
+            break
+        if state.get("itinerary_fatal"):
+            break
+    if not state.get("itinerary"):
+        state.update(fallback_itinerary(state))
+
+    return {
+        "itinerary": state.get("itinerary") or [],
+        "itinerary_notes": state.get("itinerary_notes") or [],
+        "feasibility": state.get("feasibility") or {},
+        "source": state.get("itinerary_source") or "fallback",
+    }
 
 
 def partial_result(state: TripState) -> dict:

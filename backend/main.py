@@ -15,9 +15,13 @@ from geocoding import geocode
 from attractions import get_attractions
 from chat_reply import answer_question, looks_like_question, wants_change
 from stay_prefs import detect_stay_band
+from place_edits import detect_place_edit, match_place
 import stay_revision
 from itinerary import region_center
-from agent import run_trip_plan, plan_stages, estimate_costs   # the LangGraph trip-planning agent
+from feasibility import assess as assess_days
+from agent import (   # the LangGraph trip-planning agent
+    run_trip_plan, plan_stages, estimate_costs, plan_itinerary_only,
+)
 from enrichments import estimate_fuel, fuel_stops_along_route, enrich_food, enrich_stay
 """
 init_db(): Create database/tables if needed
@@ -355,6 +359,26 @@ def plan_status(job_id: str):
 
 
 # --------------------------------------------------------------------------
+# "Will these places fit these days?" — asked BEFORE planning.
+#
+# The planner can always fall back to planning what fits, but choosing WHICH
+# places to drop is the traveller's call, not ours. This lets the UI put the
+# question to them first: extend the trip, or go back and change the places.
+# --------------------------------------------------------------------------
+class FeasibilityRequest(BaseModel):
+    source: str = Field(min_length=2, max_length=120)
+    num_days: int = Field(ge=1, le=60)
+    stops: list[PlanStop] = []
+
+
+@app.post("/plan/feasibility")
+def check_feasibility(req: FeasibilityRequest):
+    src = _geocode_or_400(req.source, "source")
+    stops = [s.model_dump() for s in req.stops]
+    return assess_days(stops, req.num_days, src["lat"], src["lon"])
+
+
+# --------------------------------------------------------------------------
 # Re-cost an existing plan.
 #
 # Party size changes nothing about HOW you get there — the route, timetables and
@@ -492,6 +516,8 @@ class ChatRequest(BaseModel):
     # answered in the abstract.
     itinerary: list[dict] | None = None
     itinerary_stays: list[dict] | None = None
+    # where the trip starts, so a re-planned itinerary can be ordered from it
+    source_geo: dict | None = None
 
 
 class PendingAction(BaseModel):
@@ -510,6 +536,7 @@ class ChatResponse(BaseModel):
     # --- plan revision, negotiated in chat ---
     pending_action: PendingAction | None = None   # waiting on the traveller
     stays_patch: list[dict] | None = None         # apply this to the plan on screen
+    itinerary_patch: dict | None = None           # {itinerary, itinerary_notes, feasibility}
 
 
 # Which chat sessions are mid-negotiation about their stays, and about what.
@@ -575,6 +602,82 @@ def chat(req: ChatRequest):
             stays_patch=outcome.get("stays"),
         )
 
+    # ------------------------------------------------------------------
+    # "also include Hampi" / "drop Varkala" — change the stop list and re-plan
+    # the DAYS, not the whole trip. The route to the region, its timetables and
+    # the budget are all still valid; only the day-by-day route is stale.
+    # ------------------------------------------------------------------
+    itinerary_patch = None
+    edit = detect_place_edit(req.message) if req.itinerary else None
+    if edit:
+        stops = [dict(x) for x in (req.itinerary or [])]
+        if edit["action"] == "remove":
+            hit = match_place(edit["phrase"], stops)
+            if hit is None:
+                reply = (
+                    f"I couldn't tell which place you meant by \"{edit['phrase']}\". "
+                    f"Your stops are: " + ", ".join(x["name"] for x in stops) + "."
+                )
+            elif len(stops) <= 1:
+                reply = "That's the only place in your plan — removing it would leave nothing to see."
+            else:
+                stops = [x for x in stops if x["name"] != hit["name"]]
+                itinerary_patch = plan_itinerary_only(
+                    source=slots.source or "", destination=slots.destination or "",
+                    travel_mode=slots.travel_mode or "public_transport",
+                    num_days=slots.num_days, source_geo=req.source_geo or {"lat": 0, "lon": 0},
+                    stops=stops,
+                )
+                reply = f"Taken {hit['name']} out and redone the days."
+        else:
+            # an addition needs real coordinates, so resolve it against the
+            # destination's own attraction list first — that also brings its
+            # category and blurb along
+            pool: list[dict] = []
+            try:
+                pool = (get_attractions(slots.destination or req.message)).get("places") or []
+            except Exception as e:  # noqa: BLE001
+                print(f"attraction lookup for a chat addition failed: {e}")
+            hit = match_place(edit["phrase"], pool)
+            if hit is None:
+                geo = geocode(f"{edit['phrase']}, {slots.destination or ''}")
+                if geo:
+                    hit = {"name": edit["phrase"], "lat": geo["lat"], "lon": geo["lon"],
+                           "category": "other", "blurb": None}
+            if hit is None:
+                reply = (
+                    f"I couldn't find \"{edit['phrase']}\" near {slots.destination or 'your destination'}. "
+                    f"Try the full name as it appears on a map."
+                )
+            elif any(x["name"].lower() == hit["name"].lower() for x in stops):
+                reply = f"{hit['name']} is already in your plan."
+            else:
+                stops.append({"name": hit["name"], "lat": hit["lat"], "lon": hit["lon"],
+                              "category": hit.get("category"), "blurb": hit.get("blurb")})
+                itinerary_patch = plan_itinerary_only(
+                    source=slots.source or "", destination=slots.destination or "",
+                    travel_mode=slots.travel_mode or "public_transport",
+                    num_days=slots.num_days, source_geo=req.source_geo or {"lat": 0, "lon": 0},
+                    stops=stops,
+                )
+                reply = f"Added {hit['name']} and redone the days."
+
+        # If the change makes the trip length wrong, say so in the same breath —
+        # that's the moment the traveller can actually act on it.
+        fit = (itinerary_patch or {}).get("feasibility") or {}
+        if fit.get("message"):
+            reply = reply + "\n\n" + fit["message"]
+
+        messages.append({"role": "user", "text": req.message})
+        messages.append({"role": "assistant", "text": reply})
+        save_session(session_id, slots, last_question, messages)
+        return ChatResponse(
+            session_id=session_id, reply=reply, slots=slots.model_dump(),
+            ready_to_plan=next_question(slots, PLANNER_FIELDS, conditional=False) is None,
+            messages=[ChatMessage(**m) for m in messages],
+            itinerary_patch=itinerary_patch,
+        )
+
     asking = looks_like_question(req.message)
 
     # Everything we already know going in — from the form OR learned earlier in
@@ -624,7 +727,7 @@ def chat(req: ChatRequest):
     band = detect_stay_band(req.message)
     if band and req.itinerary:
         offer = stay_revision.propose(
-            session_id, band, req.itinerary, req.itinerary_stays or []
+            session_id, band, req.itinerary, req.itinerary_stays or [], slots.num_days
         )
         if offer:
             _PENDING_STAY_BAND[session_id] = band

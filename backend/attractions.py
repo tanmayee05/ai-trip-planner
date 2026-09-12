@@ -43,6 +43,13 @@ CATEGORIES = [
 
 NEARBY_MAX_KM = 250      # farther than this is not a realistic add-on
 IN_DESTINATION_KM = 60   # within this counts as "in" the destination
+# How far a geocoded place may sit from the TOWN the model said it was in.
+# This is a grounding check, not a taste filter: the model names real places
+# correctly but Nominatim will happily match a bare name to a same-named
+# street in another city. Skandashramam - a cave on Arunachala hill in
+# Tiruvannamalai - was being grounded in Chennai, 140 km away, and the whole
+# itinerary was then planned around that phantom distance.
+SAME_TOWN_MAX_KM = 45
 ROAD_DETOUR = 1.3
 ROAD_KMH = 45
 
@@ -158,7 +165,28 @@ def get_attractions(destination: str) -> dict:
             continue
         seen.add(key)
 
-        geo = geocode(f"{name}, {p.nearest_town}, India") or geocode(f"{name}, India")
+        town = p.nearest_town.strip()
+        geo = geocode(f"{name}, {town}, India") if town else None
+        if geo is None:
+            # The specific query failed, so fall back to a broad one - but a
+            # bare "<name>, India" can land anywhere in the country, so only
+            # trust it if it turns up somewhere near the town the model named.
+            loose = geocode(f"{name}, India")
+            if loose and town:
+                town_geo = geocode(f"{town}, India")   # cached after the first place
+                if town_geo:
+                    off_by = straight_line_distance_km(
+                        town_geo["lat"], town_geo["lon"], loose["lat"], loose["lon"]
+                    )
+                    if off_by > SAME_TOWN_MAX_KM:
+                        print(f"  [attractions] dropped '{name}': grounded {off_by:.0f} km "
+                              f"from {town}, so that is a different place")
+                        continue
+                    geo = loose
+                else:
+                    geo = loose      # can't check the town; take it as given
+            else:
+                geo = loose
         if not geo:
             continue
 

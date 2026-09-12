@@ -24,7 +24,13 @@ export function ItineraryStaysPanel({ stays }: Props) {
       <SectionHeader
         emoji="🛏️"
         title="Food & stay along the way"
-        subtitle={`Suggestions for ${stays.length} overnight stop${stays.length > 1 ? "s" : ""}`}
+        subtitle={(() => {
+          const nights = stays.filter((s) => s.needs_hotel !== false).length;
+          const d = `${stays.length} day${stays.length === 1 ? "" : "s"}`;
+          return nights
+            ? `Food for all ${d}, and a bed for ${nights} night${nights === 1 ? "" : "s"}`
+            : `Food for all ${d}`;
+        })()}
         tone="coral"
       />
 
@@ -35,9 +41,16 @@ export function ItineraryStaysPanel({ stays }: Props) {
               <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-bubble text-[10px] font-extrabold text-white">
                 {s.day}
               </span>
-              <p className="flex items-center gap-1.5 text-xs font-bold text-ink">
-                <MapPin className="h-3.5 w-3.5 text-bubble" />
-                Night after Day {s.day} · near {s.anchor}
+              <p className="flex flex-wrap items-center gap-1.5 text-xs font-bold text-ink">
+                <MapPin className="h-3.5 w-3.5 shrink-0 text-bubble" />
+                {s.needs_hotel === false
+                  ? `Day ${s.day} (last day) · near ${s.anchor}`
+                  : `Day ${s.day}, night nearby · near ${s.anchor}`}
+                {s.travel_day && (
+                  <span className="rounded-full bg-ink/[0.06] px-2 py-0.5 text-[10px] font-bold text-ink-soft">
+                    travel day
+                  </span>
+                )}
               </p>
             </div>
 
@@ -45,7 +58,7 @@ export function ItineraryStaysPanel({ stays }: Props) {
                 near it — say which one this is. */}
             {s.skipped ? (
               <p className="rounded-xl bg-ink/[0.04] px-3 py-2 text-xs text-ink-soft ring-1 ring-inset ring-ink/10">
-                Food and stay suggestions for this night weren't fetched — the
+                Food and stay suggestions for this day weren't fetched — the
                 lookup ran out of time. Ask in the chat and I'll pull them up.
               </p>
             ) : (
@@ -76,7 +89,11 @@ export function ItineraryStaysPanel({ stays }: Props) {
                 <p className="mb-1.5 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-wide text-ink-faint">
                   <BedDouble className="h-3.5 w-3.5" /> Places to stay
                 </p>
-                {s.stay.length === 0 ? (
+                {s.needs_hotel === false ? (
+                  <p className="text-xs text-ink-faint">
+                    You head home this day — no room needed.
+                  </p>
+                ) : s.stay.length === 0 ? (
                   <p className="text-xs text-ink-faint">No suggestions found.</p>
                 ) : (
                   <ul className="space-y-1.5">

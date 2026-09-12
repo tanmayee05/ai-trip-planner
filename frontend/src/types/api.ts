@@ -29,6 +29,46 @@ export interface ChatMessage {
   text: string;
 }
 
+/** Something the destination is famous for — a dish, a craft, an experience. */
+export interface Speciality {
+  name: string;
+  kind: "food" | "sweet" | "drink" | "craft" | "experience";
+  why: string;
+  where?: string | null; // the well-known shop/eatery, when there is one
+  price_hint?: string | null;
+}
+
+export interface Specialities {
+  destination: string;
+  specialities: Speciality[];
+  /** true when live web results backed the list up, rather than model memory */
+  grounded: boolean;
+}
+
+/** One day of the trip written as a running schedule. */
+export interface NarrativeDay {
+  day: number;
+  title: string;
+  steps: { time: string; text: string }[];
+}
+
+/** Whether the number of days actually suits the places picked. Computed from
+ *  real visit lengths and driving times, not from an even split. */
+export interface Feasibility {
+  verdict: "ok" | "too_short" | "too_long";
+  needed_days: number;
+  given_days: number;
+  places: number;
+  total_hours?: number;
+  short_by?: number;
+  /** names of the places left out because they don't fit */
+  deferred?: string[];
+  spare_days?: number;
+  message?: string | null;
+  options?: string[];
+  per_place?: { name: string; hours: number; category: string }[];
+}
+
 /** A question the assistant is waiting on before it will change the plan. */
 export interface PendingAction {
   kind: string; // "stay_band"
@@ -47,6 +87,12 @@ export interface ChatResponse {
   pending_action?: PendingAction | null;
   /** the agreed replacement for the plan's overnight stays */
   stays_patch?: ItineraryStayFood[] | null;
+  /** a re-planned day-by-day route, after the traveller added or removed a place */
+  itinerary_patch?: {
+    itinerary: ItineraryStop[];
+    itinerary_notes: ItineraryNote[];
+    feasibility: Feasibility;
+  } | null;
 }
 
 export interface AuthResponse {
@@ -266,9 +312,15 @@ export interface ItineraryStayFood {
   town: string | null;
   food: EateryPlace[];
   stay: StayOption[];
-  /** the night was left unfilled — the lookup ran out of its time budget or
+  /** the day was left unfilled — the lookup ran out of its time budget or
    *  failed, rather than genuinely finding nothing */
   skipped?: boolean;
+  /** no sightseeing that day (arrival/transfer), so this is anchored on where
+   *  the next day starts */
+  travel_day?: boolean;
+  /** is there a night after this day? False on the final day — you eat there,
+   *  you don't sleep there */
+  needs_hotel?: boolean;
 }
 
 // ---- the trip back — same shape as the outbound `PlanResult` transport
@@ -322,6 +374,13 @@ export interface PlanResult {
   offers?: DriveOffer[]; // food / rest-stop prompts for own-vehicle
 
   itinerary?: ItineraryStop[]; // present when the plan was built from picked stops
+  feasibility?: Feasibility; // is the trip length sensible for these places?
+  /** places that didn't fit the days available, set aside rather than crammed */
+  deferred?: ItineraryStop[];
+  /** the plan as a readable schedule: travel, check-in, each stop, dinner */
+  narrative?: NarrativeDay[];
+  /** what the destination is known for */
+  specialities?: Specialities;
   itinerary_notes?: ItineraryNote[]; // the agent's "why this day" reasoning
   itinerary_stays?: ItineraryStayFood[]; // food + hotel picks for each overnight stop
   return?: ReturnLeg; // the trip back, in the reverse direction

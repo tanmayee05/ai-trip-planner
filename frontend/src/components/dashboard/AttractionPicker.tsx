@@ -58,9 +58,13 @@ interface Props {
   initialSelected?: string[];
   onPlan: (stops: PlanStop[]) => void;
   onBack: () => void;
+  /** a plan is being checked or started — stops a second click firing twice */
+  busy?: boolean;
 }
 
-export function AttractionPicker({ destination, initialSelected = [], onPlan, onBack }: Props) {
+export function AttractionPicker({
+  destination, initialSelected = [], onPlan, onBack, busy = false,
+}: Props) {
   const q = useQuery({
     queryKey: ["attractions", destination.trim().toLowerCase()],
     queryFn: () => fetchAttractions(destination),
@@ -204,10 +208,10 @@ export function AttractionPicker({ destination, initialSelected = [], onPlan, on
         <button
           className="btn-primary"
           onClick={submit}
-          disabled={q.isLoading || selected.size === 0}
+          disabled={q.isLoading || selected.size === 0 || busy}
         >
           <Wand2 className="h-4 w-4" />
-          Plan my trip
+          {busy ? "Checking…" : "Plan my trip"}
         </button>
       </div>
     </div>

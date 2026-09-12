@@ -12,6 +12,8 @@ import {
   MapPin,
   Pencil,
   Sparkles,
+  Car,
+  Coffee,
 } from "lucide-react";
 
 import type { ItineraryNote, ItineraryStop } from "@/types/api";
@@ -40,12 +42,25 @@ interface Props {
 export function ItineraryPanel({ itinerary, notes = [], onEdit }: Props) {
   const byDay = useMemo(() => {
     const m = new Map<number, ItineraryStop[]>();
+    // Seed from the NOTES as well as the stops. A long haul legitimately has a
+    // day with no sightseeing on it — getting there is the day's work — and
+    // the planner writes a rationale saying so. Building this map from stops
+    // alone made that day vanish from the list entirely, so the trip appeared
+    // to start on Day 2 with no explanation.
+    for (const n of notes) if (!m.has(n.day)) m.set(n.day, []);
     for (const s of itinerary) {
       if (!m.has(s.day)) m.set(s.day, []);
       m.get(s.day)!.push(s);
     }
     return [...m.entries()].sort((a, b) => a[0] - b[0]);
-  }, [itinerary]);
+  }, [itinerary, notes]);
+
+  // A blank day means different things at different points in the trip: on day
+  // one you're travelling in, after the last sight you're free or heading home.
+  const lastDayWithStops = useMemo(
+    () => itinerary.reduce((max, s) => Math.max(max, s.day), 0),
+    [itinerary],
+  );
 
   const rationaleFor = useMemo(() => {
     const m = new Map<number, string>();
@@ -90,6 +105,23 @@ export function ItineraryPanel({ itinerary, notes = [], onEdit }: Props) {
                 {rationaleFor.get(day)}
               </p>
             )}
+            {stops.length === 0 &&
+              (day === 1 ? (
+                <p className="mt-1.5 flex items-center gap-1.5 rounded-xl bg-cream px-3 py-2.5 text-xs font-semibold text-ink-soft">
+                  <Car className="h-4 w-4 shrink-0 text-ink-faint" />
+                  On the road — getting there is the day
+                </p>
+              ) : day > lastDayWithStops ? (
+                <p className="mt-1.5 flex items-center gap-1.5 rounded-xl bg-cream px-3 py-2.5 text-xs font-semibold text-ink-soft">
+                  <Coffee className="h-4 w-4 shrink-0 text-ink-faint" />
+                  Free day — nothing scheduled, so take it slow or head back early
+                </p>
+              ) : (
+                <p className="mt-1.5 flex items-center gap-1.5 rounded-xl bg-cream px-3 py-2.5 text-xs font-semibold text-ink-soft">
+                  <Coffee className="h-4 w-4 shrink-0 text-ink-faint" />
+                  Nothing scheduled for this day
+                </p>
+              ))}
             <div className="mt-1.5 space-y-2">
               {stops.map((s) => {
                 const Icon = CAT_ICON[s.category ?? "other"] ?? MapPin;

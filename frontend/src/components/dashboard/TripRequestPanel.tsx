@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { SlidersHorizontal, MessagesSquare, RefreshCw, Minimize2 } from "lucide-react";
 
 import type { PlanInput, TravelMode } from "@/api/plan";
-import type { ItineraryStayFood, ItineraryStop } from "@/types/api";
+import type { ChatResponse, ItineraryStayFood, ItineraryStop } from "@/types/api";
 import { TripRequestForm } from "@/components/dashboard/TripRequestForm";
 import { TripChat } from "@/components/dashboard/TripChat";
 import { todayISO } from "@/lib/format";
@@ -43,12 +43,14 @@ interface Props {
   itinerary?: ItineraryStop[];
   itineraryStays?: ItineraryStayFood[];
   onStaysPatch?: (stays: ItineraryStayFood[]) => void;
+  sourceGeo?: { lat: number; lon: number };
+  onItineraryPatch?: (patch: NonNullable<ChatResponse["itinerary_patch"]>) => void;
 }
 
 export function TripRequestPanel({
   onSubmit, busy = false, initial, onCollapse, chatSessionId, onChatSessionId,
   planned = false, plannedInput = null,
-  itinerary = [], itineraryStays = [], onStaysPatch,
+  itinerary = [], itineraryStays = [], onStaysPatch, sourceGeo, onItineraryPatch,
 }: Props) {
   const [tab, setTab] = useState<Tab>("form");
 
@@ -183,6 +185,8 @@ export function TripRequestPanel({
           itinerary={itinerary}
           itineraryStays={itineraryStays}
           onStaysPatch={onStaysPatch}
+          sourceGeo={sourceGeo}
+          onItineraryPatch={onItineraryPatch}
         />
       )}
     </div>

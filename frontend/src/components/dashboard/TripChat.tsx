@@ -6,7 +6,9 @@ import toast from "react-hot-toast";
 import { sendChat, getChatHistory } from "@/api/chat";
 import type { TripDraft } from "@/components/dashboard/TripRequestPanel";
 import type { TravelMode } from "@/api/plan";
-import type { ItineraryStayFood, ItineraryStop, PendingAction, TripSlots } from "@/types/api";
+import type {
+  ChatResponse, ItineraryStayFood, ItineraryStop, PendingAction, TripSlots,
+} from "@/types/api";
 import { apiErrorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -62,6 +64,10 @@ interface Props {
   itineraryStays?: ItineraryStayFood[];
   /** the traveller agreed to a stay change — hand the replacement to the page */
   onStaysPatch?: (stays: ItineraryStayFood[]) => void;
+  /** where the trip starts, so a re-planned itinerary can be ordered from it */
+  sourceGeo?: { lat: number; lon: number };
+  /** the traveller added or removed a place — hand back the re-planned days */
+  onItineraryPatch?: (patch: NonNullable<ChatResponse["itinerary_patch"]>) => void;
 }
 
 /** Only the fields whose value genuinely differs from the shared draft. The
@@ -82,7 +88,7 @@ interface Msg {
 
 export function TripChat({
   draft, patch, onNext, busy = false, sessionId, onSessionId, planned = false,
-  itinerary = [], itineraryStays = [], onStaysPatch,
+  itinerary = [], itineraryStays = [], onStaysPatch, sourceGeo, onItineraryPatch,
 }: Props) {
   // opening line adapts to whatever the Form tab may already hold
   const greeting = useMemo<Msg>(() => {
@@ -124,6 +130,8 @@ export function TripChat({
 
   /** the assistant is waiting on an answer before it changes anything */
   const [pending, setPending] = useState<PendingAction | null>(null);
+  /** day options ticked so far, for a question that accepts several */
+  const [pickedDays, setPickedDays] = useState<string[]>([]);
 
   /** has this conversation already pushed the flow on to fetching places?
    *  Starts true when a plan is already on screen, so re-opening the chat to
@@ -181,6 +189,7 @@ export function TripChat({
         // only meaningful once a plan exists; the backend ignores it otherwise
         itinerary,
         itinerary_stays: itineraryStays,
+        source_geo: sourceGeo,
       });
       onSessionId(res.session_id);
       setTurns(res.messages); // authoritative transcript from the backend
@@ -188,8 +197,10 @@ export function TripChat({
 
       // The assistant is waiting on a decision before it touches the plan.
       setPending(res.pending_action ?? null);
-      // ...and this is the change the traveller agreed to.
+      setPickedDays([]);   // a fresh question starts with nothing ticked
+      // ...and these are the changes the traveller asked for.
       if (res.stays_patch) onStaysPatch?.(res.stays_patch);
+      if (res.itinerary_patch) onItineraryPatch?.(res.itinerary_patch);
 
       const p = changedFields(draft, slotsToDraftPatch(res.slots));
       if (Object.keys(p).length) patch(p);
@@ -329,22 +340,72 @@ export function TripChat({
             exit={{ opacity: 0, height: 0 }}
             className="mt-2 overflow-hidden"
           >
-            <div className="flex flex-wrap gap-1.5">
-              {pending.options.map((opt) => (
+            {/* Per-day options are TICK-BOXES, not one-of buttons: wanting
+                nights 1 and 2 is entirely normal, and single-select forced the
+                traveller to ask again for each night. "The whole trip" and
+                "No need" stay single-shot — they answer the question outright. */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {pending.options.map((opt) => {
+                const isDay = /^day\s*\d+$/i.test(opt.trim());
+                if (!isDay) {
+                  return (
+                    <button
+                      key={opt}
+                      disabled={busy || sending}
+                      onClick={() => {
+                        setPickedDays([]);
+                        send(opt);
+                      }}
+                      className={cn(
+                        "rounded-full border px-3 py-1.5 text-xs font-bold transition disabled:opacity-40",
+                        opt.toLowerCase().startsWith("no")
+                          ? "border-ink/10 text-ink-soft hover:border-ink/25 hover:text-ink"
+                          : "border-brand-300 bg-brand-50 text-brand-700 hover:bg-brand-100",
+                      )}
+                    >
+                      {opt}
+                    </button>
+                  );
+                }
+                const on = pickedDays.includes(opt);
+                return (
+                  <button
+                    key={opt}
+                    disabled={busy || sending}
+                    aria-pressed={on}
+                    onClick={() =>
+                      setPickedDays((cur) =>
+                        cur.includes(opt) ? cur.filter((d) => d !== opt) : [...cur, opt],
+                      )
+                    }
+                    className={cn(
+                      "flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-bold transition disabled:opacity-40",
+                      on
+                        ? "border-brand-500 bg-brand-500 text-white"
+                        : "border-brand-300 bg-brand-50 text-brand-700 hover:bg-brand-100",
+                    )}
+                  >
+                    {on && <Check className="h-3 w-3" />}
+                    {opt}
+                  </button>
+                );
+              })}
+
+              {pickedDays.length > 0 && (
                 <button
-                  key={opt}
                   disabled={busy || sending}
-                  onClick={() => send(opt)}
-                  className={cn(
-                    "rounded-full border px-3 py-1.5 text-xs font-bold transition disabled:opacity-40",
-                    opt.toLowerCase().startsWith("no")
-                      ? "border-ink/10 text-ink-soft hover:border-ink/25 hover:text-ink"
-                      : "border-brand-300 bg-brand-50 text-brand-700 hover:bg-brand-100",
-                  )}
+                  onClick={() => {
+                    const nums = pickedDays
+                      .map((d) => d.replace(/\D+/g, ""))
+                      .sort((a, b) => Number(a) - Number(b));
+                    setPickedDays([]);
+                    send(nums.length === 1 ? `day ${nums[0]}` : `days ${nums.join(", ")}`);
+                  }}
+                  className="rounded-full bg-brand-gradient px-3 py-1.5 text-xs font-extrabold text-white transition hover:shadow-soft disabled:opacity-40"
                 >
-                  {opt}
+                  Apply to {pickedDays.length} night{pickedDays.length === 1 ? "" : "s"}
                 </button>
-              ))}
+              )}
             </div>
           </motion.div>
         )}

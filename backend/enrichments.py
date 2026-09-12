@@ -559,59 +559,96 @@ def enrich_stay(geometry: list[list[float]], radius_km: float = 150,
 # food & stay around the ITINERARY  (any travel mode — this is about the
 # destination side, not the drive there)
 # ======================================================================
-def stays_and_food_for_itinerary(itinerary: list[dict]) -> list[dict]:
-    """One food + stay suggestion set per overnight halt — the last place
-    visited each day, for every day except the final one (the trip ends
-    that day, so there's no further night to plan for). Works the same
-    whether the traveller drove, flew, took a train or a bus — it's about
-    where they'll actually be standing at the end of each day."""
+def stays_and_food_for_itinerary(itinerary: list[dict],
+                                 num_days: int | None = None) -> list[dict]:
+    """Food for every day of the trip, and a hotel for every night of it.
+
+    Two things this deliberately does NOT do, because the earlier version did
+    and both were wrong:
+
+    * It doesn't key off "days that have stops". An arrival day with no
+      sightseeing on it is still a day you sleep somewhere — it was getting no
+      hotel at all.
+    * It doesn't treat food as a by-product of the overnight halt. You eat on
+      the last day of the trip too; bundling the two meant the final day got
+      neither food nor anything else.
+
+    So: iterate the real trip days. Food on all of them, a hotel on every day
+    that has a night after it. On a travel day with no stops of its own we
+    anchor on the FIRST place of the next day — which is where you'd actually
+    want to be standing the following morning.
+    """
     if not itinerary:
         return []
 
     by_day: dict[int, list[dict]] = {}
     for s in itinerary:
         by_day.setdefault(s["day"], []).append(s)
-    days = sorted(by_day)
+    if not by_day:
+        return []
 
-    # Each night costs a Gemini call plus several rate-limited Nominatim
-    # lookups — roughly 15-20 seconds. On a 10-day trip that alone would
-    # outlast the client's patience and take the whole plan down with it, so
-    # the section runs against a wall-clock budget: nights we reach are
-    # filled in, the rest come back marked `skipped` for the UI to offer
-    # on demand. A partial answer beats a failed plan.
+    total_days = max(num_days or 0, max(by_day))
+
+    def anchor_for(day: int) -> tuple[dict | None, bool]:
+        """(the stop to search around, whether this is a travel day)."""
+        if by_day.get(day):
+            return by_day[day][-1], False
+        # nothing planned that day: base yourself where tomorrow starts
+        for d in range(day + 1, total_days + 1):
+            if by_day.get(d):
+                return by_day[d][0], True
+        # or, failing that, where yesterday left off
+        for d in range(day - 1, 0, -1):
+            if by_day.get(d):
+                return by_day[d][-1], True
+        return None, True
+
+    # Each day costs a Gemini call plus several rate-limited Nominatim lookups
+    # — roughly 15-20 seconds. On a long trip that alone would outlast the
+    # client's patience and take the whole plan down with it, so this runs
+    # against a wall-clock budget: days we reach are filled in, the rest come
+    # back marked `skipped` for the UI to offer on demand.
     deadline = time.monotonic() + STAYS_BUDGET_S
 
     out: list[dict] = []
-    for day in days[:-1]:                    # the last day needs no further night
-        anchor_stop = by_day[day][-1]
+    for day in range(1, total_days + 1):
+        anchor_stop, is_travel_day = anchor_for(day)
+        if anchor_stop is None:
+            continue
         anchor = [anchor_stop["lat"], anchor_stop["lon"]]
+        needs_hotel = day < total_days          # no night after the final day
 
         if time.monotonic() > deadline:
             out.append({
                 "day": day, "anchor": anchor_stop["name"], "town": None,
                 "food": [], "stay": [], "skipped": True,
+                "travel_day": is_travel_day, "needs_hotel": needs_hotel,
             })
             continue
 
         try:
             town = _town_at(anchor[0], anchor[1])
             food = _eateries_at(anchor, town, 10)
-            hotel_ask = (
-                f"In or near {town}, India — name 3 real hotels or lodges good for "
-                f"an overnight halt on a sightseeing trip (safe, well-reviewed, "
-                f"reasonably close to the sights). "
-            )
-            stay = _hotels_at(anchor, town, hotel_ask)
-        except Exception as e:  # noqa: BLE001 — one bad night, not a bad trip
+            stay: list[dict] = []
+            if needs_hotel:
+                hotel_ask = (
+                    f"In or near {town}, India — name 3 real hotels or lodges good for "
+                    f"an overnight halt on a sightseeing trip (safe, well-reviewed, "
+                    f"reasonably close to the sights). "
+                )
+                stay = _hotels_at(anchor, town, hotel_ask)
+        except Exception as e:  # noqa: BLE001 — one bad day, not a bad trip
             print(f"stay/food lookup failed for day {day}: {type(e).__name__}: {e}")
             out.append({
                 "day": day, "anchor": anchor_stop["name"], "town": None,
                 "food": [], "stay": [], "skipped": True,
+                "travel_day": is_travel_day, "needs_hotel": needs_hotel,
             })
             continue
 
         out.append({
             "day": day, "anchor": anchor_stop["name"], "town": town,
             "food": food, "stay": stay,
+            "travel_day": is_travel_day, "needs_hotel": needs_hotel,
         })
     return out

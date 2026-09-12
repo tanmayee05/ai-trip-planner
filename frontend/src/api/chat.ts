@@ -22,6 +22,8 @@ export function sendChat(body: {
    *  offered against the real itinerary rather than answered in the abstract */
   itinerary?: unknown[];
   itinerary_stays?: unknown[];
+  /** where the trip starts — a re-planned itinerary is ordered from here */
+  source_geo?: { lat: number; lon: number };
 }) {
   // A plain reply is quick, but a turn that APPLIES a change (e.g. agreeing to
   // premium stays) re-picks hotels: one Gemini call plus several Nominatim

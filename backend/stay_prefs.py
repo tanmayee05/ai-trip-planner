@@ -72,12 +72,16 @@ def detect_stay_band(message: str) -> str | None:
     return None
 
 
-def parse_scope(message: str, nights: list[int]) -> str | int | None:
-    """Turn the reply to "whole trip, one day, or leave it?" into a scope.
+def parse_scope(message: str, nights: list[int]) -> str | list[int] | None:
+    """Turn the reply to "whole trip, or which days?" into a scope.
 
-    Returns "all", "none", a day number that is actually one of `nights`, or
-    None when the answer doesn't settle it (so the caller can ask again rather
-    than guess and change the wrong thing).
+    Returns "all", "none", a LIST of day numbers, or None when the answer
+    doesn't settle it (so the caller can ask again rather than guess and change
+    the wrong nights).
+
+    A list, not a single day: "days 1 and 2" is an obvious thing to want on a
+    four-night trip, and only accepting one day at a time made the traveller
+    repeat themselves for every night they cared about.
     """
     text = message.lower().strip()
 
@@ -87,7 +91,7 @@ def parse_scope(message: str, nights: list[int]) -> str | int | None:
 
     # "no" first: "no, just day 2" is a day answer, but a bare no is a refusal
     if _has_phrase(text, _NO_WORDS):
-        if not re.search(r"\bday\s*\d+|\bonly\b|\bjust\b", text):
+        if not re.search(r"\bday\s*\d+|\bonly\b|\bjust\b|\d", text):
             return "none"
     if re.fullmatch(r"\W*(no|nah)\W*", text):
         return "none"
@@ -95,22 +99,38 @@ def parse_scope(message: str, nights: list[int]) -> str | int | None:
     if _has_phrase(text, _ALL_WORDS):
         return "all"
 
-    # an explicit day: "day 3", "3rd day", "only the second day"
-    m = re.search(r"\bday\s*(\d{1,2})\b", text) or re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+day\b", text)
-    if m:
-        day = int(m.group(1))
-        return day if day in nights else None
+    days: list[int] = []
+
+    # "day 1", "days 1 and 2", "day 1, 3"
+    for m in re.finditer(r"\bdays?\s*((?:\d{1,2}[\s,and&+/-]*)+)", text):
+        days += [int(n) for n in re.findall(r"\d{1,2}", m.group(1))]
+
+    # each "day N" written out separately - "day 2 and day 4" is two days,
+    # and the grouped pattern above stops at the first one
+    for m in re.finditer(r"\bday\s*(\d{1,2})\b", text):
+        days.append(int(m.group(1)))
+
+    # "2nd day", "the second day"
+    for m in re.finditer(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+day\b", text):
+        days.append(int(m.group(1)))
     for word, num in _WORD_NUM.items():
         if re.search(rf"\b(?:day\s+{word}|{word}\s+day)\b", text):
-            return num if num in nights else None
+            days.append(num)
 
-    # a bare number is only unambiguous when it names one of the nights
-    m = re.fullmatch(r"\W*(\d{1,2})\W*", text)
-    if m:
-        day = int(m.group(1))
-        return day if day in nights else None
+    # a bare list of numbers ("1 and 2", "1,3") is only safe when every one of
+    # them names a real night
+    if not days:
+        bare = [int(n) for n in re.findall(r"\b\d{1,2}\b", text)]
+        if bare and all(b in nights for b in bare):
+            days = bare
 
-    # a plain yes to a three-way question means "yes, do it" -> the whole trip
+    if days:
+        valid = sorted({d for d in days if d in nights})
+        if not valid:
+            return None                 # they named nights that don't exist
+        return "all" if set(valid) == set(nights) else valid
+
+    # a plain yes to the question means "yes, do it" -> the whole trip
     if _has_phrase(text, _YES_WORDS):
         return "all"
 

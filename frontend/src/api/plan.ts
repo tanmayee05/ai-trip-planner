@@ -1,5 +1,5 @@
 import { api } from "@/lib/api";
-import type { CostBreakdown, PlanJob } from "@/types/api";
+import type { CostBreakdown, Feasibility, PlanJob } from "@/types/api";
 
 export interface PlanStop {
   name: string;
@@ -25,6 +25,17 @@ export interface PlanInput {
 /** Kick off a plan. Returns immediately with a job in state "running". */
 export function startPlan(body: PlanInput) {
   return api.post<PlanJob>("/plan", body).then((r) => r.data);
+}
+
+/** Ask whether a set of places fits a number of days, WITHOUT planning
+ *  anything. Lets the UI put the choice to the traveller — more days, or fewer
+ *  places — before a plan is built, instead of quietly dropping stops. */
+export function checkFeasibility(body: {
+  source: string;
+  num_days: number;
+  stops: PlanStop[];
+}) {
+  return api.post<Feasibility>("/plan/feasibility", body).then((r) => r.data);
 }
 
 /** Recompute just the budget for a plan already on screen. Party size doesn't

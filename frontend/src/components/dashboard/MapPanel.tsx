@@ -11,7 +11,11 @@ interface Props {
   source?: GeoPoint;
   destination?: GeoPoint;
   itinerary?: ItineraryStop[];
-  routeLine?: [number, number][]; // [lat, lon] road path (own-vehicle)
+  routeLine?: [number, number][]; // [lat, lon] road path out (own-vehicle)
+  /** the drive home, from the last place visited back to the start. A separate
+   *  road path because it isn't the outbound one reversed — it leaves from
+   *  wherever the itinerary actually ended, not from the destination. */
+  returnLine?: [number, number][];
   routeMarkers?: RouteMarker[]; // fuel / food / stay pins along the route
 }
 
@@ -84,7 +88,9 @@ function FitBounds({ points }: { points: LatLng[] }) {
   return null;
 }
 
-export function MapPanel({ source, destination, itinerary = [], routeLine, routeMarkers = [] }: Props) {
+export function MapPanel({
+  source, destination, itinerary = [], routeLine, returnLine, routeMarkers = [],
+}: Props) {
   const [you, setYou] = useState<LatLng | null>(null);
 
   useEffect(() => {
@@ -108,10 +114,13 @@ export function MapPanel({ source, destination, itinerary = [], routeLine, route
     if (source) pts.push([source.lat, source.lon]);
     if (destination) pts.push([destination.lat, destination.lon]);
     pts.push(...stops);
+    // the way home can swing wide of everything else, so it has to count
+    // towards the bounds or half of it ends up off-screen
+    if (returnLine) pts.push(...returnLine);
     for (const m of pins) pts.push([m.lat, m.lon]);
     if (you) pts.push(you);
     return pts;
-  }, [source, destination, stops, pins, you]);
+  }, [source, destination, stops, pins, you, returnLine]);
 
   const hasData = !!source || !!destination || stops.length > 0;
 
@@ -175,6 +184,17 @@ export function MapPanel({ source, destination, itinerary = [], routeLine, route
             <Polyline positions={routeLine} pathOptions={{ color: "#2176AE", weight: 4, opacity: 0.8 }} />
           )}
 
+          {/* The drive back. Dashed and in the return-panel's colour so it
+              reads as a different leg — on a loop trip it often takes a
+              different road home, and a solid line the same colour as the
+              outbound one would just look like a duplicate. */}
+          {returnLine && returnLine.length > 1 && (
+            <Polyline
+              positions={returnLine}
+              pathOptions={{ color: "#E4572E", weight: 3.5, opacity: 0.75, dashArray: "10 8" }}
+            />
+          )}
+
           {stops.length > 1 && (
             <Polyline positions={stops} pathOptions={{ color: "#2176AE", weight: 3, dashArray: "6 8" }} />
           )}
@@ -192,6 +212,28 @@ export function MapPanel({ source, destination, itinerary = [], routeLine, route
           )}
         </MapContainer>
       </div>
+
+      {/* With two road paths on the map, which is which has to be stated —
+          a solid blue line and a dashed coral one mean nothing on their own. */}
+      {routeLine && routeLine.length > 1 && returnLine && returnLine.length > 1 && (
+        <div className="pointer-events-none absolute bottom-3 left-3 z-[500] flex flex-col gap-1 rounded-xl bg-paper/95 px-2.5 py-2 shadow-soft ring-1 ring-ink/10">
+          <span className="flex items-center gap-1.5 text-[11px] font-bold text-ink-soft">
+            <svg width="22" height="4" aria-hidden>
+              <line x1="0" y1="2" x2="22" y2="2" stroke="#2176AE" strokeWidth="4" />
+            </svg>
+            Drive there
+          </span>
+          <span className="flex items-center gap-1.5 text-[11px] font-bold text-ink-soft">
+            <svg width="22" height="4" aria-hidden>
+              <line
+                x1="0" y1="2" x2="22" y2="2"
+                stroke="#E4572E" strokeWidth="3.5" strokeDasharray="6 4"
+              />
+            </svg>
+            Way back
+          </span>
+        </div>
+      )}
 
       {!hasData && (
         <div className="pointer-events-none absolute inset-0 grid place-items-center bg-cream/70 backdrop-blur-[1px]">

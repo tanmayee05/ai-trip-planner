@@ -2,13 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   History, RotateCcw, MapPin, CalendarDays, Compass, Route, Map as MapIcon,
-  Bus, Car, Fuel, Wallet, SlidersHorizontal, ChevronDown, BedDouble, Undo2,
+  Bus, Car, Fuel, Wallet, SlidersHorizontal, ChevronDown, BedDouble, Undo2, Sparkles,
 } from "lucide-react";
 
 import { TopBar } from "@/components/TopBar";
 import { TripRequestPanel } from "@/components/dashboard/TripRequestPanel";
 import { AttractionPicker } from "@/components/dashboard/AttractionPicker";
 import { ItineraryPanel } from "@/components/dashboard/ItineraryPanel";
+import { DayPlanPanel } from "@/components/dashboard/DayPlanPanel";
+import { SpecialityPanel } from "@/components/dashboard/SpecialityPanel";
+import { TooManyPlacesDialog } from "@/components/dashboard/TooManyPlacesDialog";
 import { ItineraryStaysPanel } from "@/components/dashboard/ItineraryStaysPanel";
 import { MapPanel } from "@/components/dashboard/MapPanel";
 import { RecommendationsPanel } from "@/components/dashboard/RecommendationsPanel";
@@ -25,11 +28,11 @@ import { Confetti } from "@/components/common/Confetti";
 import { usePlanJob } from "@/hooks/usePlanJob";
 import { prettyDate, todayISO } from "@/lib/format";
 import { classifyChange } from "@/lib/planDiff";
-import { recostPlan } from "@/api/plan";
+import { checkFeasibility, recostPlan } from "@/api/plan";
 import { apiErrorMessage } from "@/lib/api";
 import toast from "react-hot-toast";
 import type { PlanInput, PlanStop } from "@/api/plan";
-import type { PlanJob, RouteMarker, TripDetail } from "@/types/api";
+import type { Feasibility, PlanJob, RouteMarker, TripDetail } from "@/types/api";
 
 const zone = {
   hidden: { opacity: 0, y: 18 },
@@ -53,6 +56,10 @@ export function DashboardPage() {
   // the form as it's edited; this one doesn't move until a plan actually runs,
   // so comparing the two is what tells us whether the plan has gone stale.
   const [plannedInput, setPlannedInput] = useState<PlanInput | null>(null);
+  // A plan the traveller asked for that we haven't started, because the places
+  // don't fit the days and that's their decision to make, not ours.
+  const [tooMany, setTooMany] = useState<{ fit: Feasibility; input: PlanInput } | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const [routeMarkers, setRouteMarkers] = useState<RouteMarker[]>([]);
 
@@ -95,8 +102,14 @@ export function DashboardPage() {
   const navSections = useMemo<JourneySection[]>(() => {
     const s: JourneySection[] = [{ id: "sec-plan", label: "Plan", icon: Compass }];
     if (itinerary.length > 0) s.push({ id: "sec-itinerary", label: "Itinerary", icon: Route });
+    if ((result?.narrative?.length ?? 0) > 0) {
+      s.push({ id: "sec-dayplan", label: "Day plan", icon: CalendarDays });
+    }
     if ((result?.itinerary_stays?.length ?? 0) > 0) {
       s.push({ id: "sec-stays", label: "Stay & food", icon: BedDouble });
+    }
+    if ((result?.specialities?.specialities?.length ?? 0) > 0) {
+      s.push({ id: "sec-speciality", label: "Speciality", icon: Sparkles });
     }
     s.push({ id: "sec-map", label: "Map", icon: MapIcon });
     s.push({
@@ -108,7 +121,8 @@ export function DashboardPage() {
     if (hasReturn) s.push({ id: "sec-return", label: "Way back", icon: Undo2 });
     if (hasCosts) s.push({ id: "sec-cost", label: "Budget", icon: Wallet });
     return s;
-  }, [itinerary.length, isDrive, result?.drive, hasCosts, result?.itinerary_stays, hasReturn]);
+  }, [itinerary.length, isDrive, result?.drive, hasCosts, result?.itinerary_stays, hasReturn,
+      result?.narrative, result?.specialities]);
 
   /** food + hotel pins for each overnight itinerary stop, dropped on the map
    *  alongside any driving-route pins (fuel/food/stay/toll from DriveAssistant) */
@@ -208,17 +222,58 @@ export function DashboardPage() {
     }
   }
 
-  function handlePlan(stops: PlanStop[]) {
-    if (!draft) return;
-    setPickedNames(stops.map((s) => s.name));
-    const full = { ...draft, stops };
+  /** Actually start planning. Everything that decides WHETHER to start is
+   *  above this, in handlePlan. */
+  function startPlan(full: PlanInput) {
+    setPickedNames((full.stops ?? []).map((s) => s.name));
     setLastInput(full);
     setPlannedInput(full); // this is the input the resulting plan belongs to
     setRouteMarkers([]); // clear route pins from the previous plan
+    setTooMany(null);
     // hand the chat transcript id along so, if this trip gets saved, History
     // can restore the same conversation later instead of starting a blank one
     plan.run({ ...full, chat_session_id: chatSessionId });
     setDraft(null);
+  }
+
+  /** The picker's "Plan my trip".
+   *
+   *  If the chosen places can't fit the chosen days, ASK rather than decide.
+   *  The planner can plan "the ones that fit", but choosing which places to
+   *  sacrifice belongs to the traveller — picking 3 of 10 and calling it their
+   *  plan is the wrong answer even when the 3 are sensible ones. */
+  function handlePlan(stops: PlanStop[]) {
+    if (!draft) return;
+    void attemptPlan({ ...draft, stops });
+  }
+
+  /** Check the fit, then either ask or plan. Re-entrant on purpose: the
+   *  dialog's "add days" comes back through here, so a trip that's still too
+   *  short gets asked about again rather than planned and quietly trimmed. */
+  async function attemptPlan(full: PlanInput) {
+    const stops = full.stops ?? [];
+
+    if (full.num_days && stops.length > 1) {
+      setChecking(true);
+      try {
+        const fit = await checkFeasibility({
+          source: full.source,
+          num_days: full.num_days,
+          stops,
+        });
+        if (fit.verdict === "too_short") {
+          setPickedNames(stops.map((s) => s.name)); // keep the selection intact
+          setTooMany({ fit, input: full });
+          return;
+        }
+      } catch {
+        // the check is a courtesy, not a gate — if it fails, plan anyway and
+        // the plan's own feasibility note still explains the outcome
+      } finally {
+        setChecking(false);
+      }
+    }
+    startPlan(full);
   }
 
   /** re-open the stop picker with the same trip basics + current selection */
@@ -360,6 +415,23 @@ export function DashboardPage() {
                   itinerary={itinerary}
                   itineraryStays={result?.itinerary_stays ?? []}
                   onStaysPatch={(stays) => plan.patchResult({ itinerary_stays: stays })}
+                  sourceGeo={job ? { lat: job.source.lat, lon: job.source.lon } : undefined}
+                  onItineraryPatch={(p) => {
+                    plan.patchResult({
+                      itinerary: p.itinerary,
+                      itinerary_notes: p.itinerary_notes,
+                      feasibility: p.feasibility,
+                    });
+                    // keep the form's stop list in step, so a later re-plan
+                    // uses the places the traveller actually settled on
+                    const stops = p.itinerary.map((x) => ({
+                      name: x.name, lat: x.lat, lon: x.lon,
+                      category: x.category, blurb: x.blurb,
+                    }));
+                    setPickedNames(stops.map((x) => x.name));
+                    setLastInput((prev) => (prev ? { ...prev, stops } : prev));
+                    setPlannedInput((prev) => (prev ? { ...prev, stops } : prev));
+                  }}
                 />
               </motion.div>
             </div>
@@ -430,6 +502,7 @@ export function DashboardPage() {
                     initialSelected={pickedNames}
                     onPlan={handlePlan}
                     onBack={() => setDraft(null)}
+                    busy={checking}
                   />
                 </motion.div>
               ) : (
@@ -485,6 +558,19 @@ export function DashboardPage() {
                     </motion.section>
                   )}
 
+                  {(result?.narrative?.length ?? 0) > 0 && (
+                    <motion.section
+                      id="sec-dayplan"
+                      className="scroll-anchor"
+                      variants={zone}
+                      custom={0.3}
+                      initial="hidden"
+                      animate="show"
+                    >
+                      <DayPlanPanel days={result?.narrative} />
+                    </motion.section>
+                  )}
+
                   {(result?.itinerary_stays?.length ?? 0) > 0 && (
                     <motion.section
                       id="sec-stays"
@@ -495,6 +581,19 @@ export function DashboardPage() {
                       animate="show"
                     >
                       <ItineraryStaysPanel stays={result!.itinerary_stays!} />
+                    </motion.section>
+                  )}
+
+                  {(result?.specialities?.specialities?.length ?? 0) > 0 && (
+                    <motion.section
+                      id="sec-speciality"
+                      className="scroll-anchor"
+                      variants={zone}
+                      custom={0.7}
+                      initial="hidden"
+                      animate="show"
+                    >
+                      <SpecialityPanel data={result?.specialities} />
                     </motion.section>
                   )}
 
@@ -511,6 +610,9 @@ export function DashboardPage() {
                       destination={job?.destination}
                       itinerary={itinerary}
                       routeLine={isDrive ? result?.drive?.geometry : undefined}
+                      // the drive home starts at the LAST place visited, not at
+                      // the destination, so it's its own road path
+                      returnLine={isDrive ? result?.return?.drive?.geometry : undefined}
                       routeMarkers={[...routeMarkers, ...stayFoodMarkers]}
                     />
                   </motion.section>
@@ -588,6 +690,33 @@ export function DashboardPage() {
           </div>
         </div>
       </main>
+
+      <AnimatePresence>
+        {tooMany && (
+          <TooManyPlacesDialog
+            fit={tooMany.fit}
+            onAddDays={(extra) => {
+              const days = (tooMany.input.num_days ?? 1) + extra;
+              const longer = { ...tooMany.input, num_days: days };
+              // keep the form in step, so it shows the trip they agreed to
+              setLastInput(longer);
+              setFormKey((k) => k + 1);
+              // Re-CHECK rather than plan. Adding 2 days to a trip that needed
+              // 6 more still doesn't fit, and planning anyway just produced the
+              // silently-trimmed plan again. This asks once more with the new
+              // numbers, so it keeps asking until the trip actually fits.
+              setTooMany(null);
+              void attemptPlan(longer);
+            }}
+            onEditPlaces={() => {
+              // straight back to the picker with their selection still there
+              setTooMany(null);
+              setDraft(tooMany.input);
+            }}
+            onCancel={() => setTooMany(null)}
+          />
+        )}
+      </AnimatePresence>
 
       <HistoryDrawer
         open={historyOpen}
