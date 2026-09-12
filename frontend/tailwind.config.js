@@ -124,6 +124,26 @@ export default {
           "0%": { transform: "translateX(-8%)" },
           "100%": { transform: "translateX(108%)" },
         },
+        /* The mesh wash slowly breathing, so the backdrop is never quite still.
+           Transform, not background-position: animating a gradient's position
+           repaints the whole viewport every frame, whereas a transform on an
+           oversized layer is composited on the GPU and costs nothing to keep
+           running. The layer is scaled past its box so the drift never
+           exposes an edge. */
+        "mesh-float": {
+          "0%,100%": { transform: "translate3d(-1.5%, -1%, 0) scale(1.08)" },
+          "50%": { transform: "translate3d(1.5%, 1%, 0) scale(1.12)" },
+        },
+        /* the topographic texture creeping past, like ground under a window */
+        "contour-drift": {
+          "0%": { backgroundPosition: "0 0, 0 0" },
+          "100%": { backgroundPosition: "240px 120px, -240px -120px" },
+        },
+        /* a bird's wingbeat - squashed vertically, not moved */
+        wing: {
+          "0%,100%": { transform: "scaleY(1)" },
+          "50%": { transform: "scaleY(0.55)" },
+        },
         "spin-slow": {
           "0%": { transform: "rotate(0deg)" },
           "100%": { transform: "rotate(360deg)" },
@@ -151,6 +171,9 @@ export default {
         twinkle: "twinkle 3.4s ease-in-out infinite",
         "gradient-pan": "gradient-pan 14s ease infinite",
         drift: "drift 42s linear infinite",
+        "mesh-float": "mesh-float 34s ease-in-out infinite",
+        "contour-drift": "contour-drift 120s linear infinite",
+        wing: "wing 0.9s ease-in-out infinite",
         "spin-slow": "spin-slow 26s linear infinite",
         "dash-flow": "dash-flow 2.4s linear infinite",
         rise: "rise 0.5s cubic-bezier(0.22,1,0.36,1) both",

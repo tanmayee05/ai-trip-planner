@@ -1,14 +1,16 @@
 # AI Trip Planner — Project Overview
 
-_Last updated: 2026-09-03_
+_Last updated: 2026-09-12_
 
 This document explains **what is built so far**, **the tech stack and why each piece was
 chosen**, and **how the whole backend fits together**.
 
-Two companion files go deeper:
+Companion files go deeper:
 
 | File | Covers |
 |------|--------|
+| [`README.md`](./README.md) | The front door: what it does, quickstart, the HTTP surface |
+| [`RUNNING.md`](./RUNNING.md) | How to run it, and how each behaviour actually behaves |
 | [`BACKEND_FILES.md`](./BACKEND_FILES.md) | Every backend `.py` file: its job, its logic, its functions |
 | [`DATABASES.md`](./DATABASES.md) | How `trains.db`, `flights.db` and `sessions.db` are built and queried |
 
@@ -20,31 +22,43 @@ Given a plain-English request like:
 
 > _"5 day trip to Coorg, starting from Rebala, by public transport"_
 
-the system will eventually produce a full travel plan. Today it does the two hardest
-groundwork pieces:
-
-1. **Conversation → structured trip details** (the "slots" the planner needs).
-2. **Source + destination → which transport modes actually connect them**
-   (train / bus / flight), with a recommended boarding point and a last‑mile estimate.
+the system produces a complete travel plan: which places are worth seeing, whether
+they fit the days available, which trains/buses/flights actually run on that date, a
+day-by-day route you could genuinely follow, where to eat and sleep each night, what
+the place is famous for, the drive home, and a ball-park budget — written out both as
+sections and as an hour-by-hour schedule.
 
 ### Current status
 
 | Capability | State | Entry point |
 |------------|-------|-------------|
-| Chat that collects trip details (destination, source, days, travel mode) | ✅ working | `main.py` (HTTP) / `chat_loop.py` (terminal) |
+| Chat that collects trip details (destination, source, days, people, mode) | ✅ working | `main.py` `/chat` · `chat_loop.py` (terminal) |
+| Form + chat over one shared draft, either can drive the flow | ✅ working | `TripRequestPanel.tsx` |
 | Session persistence across messages | ✅ working | `database.py` → `sessions.db` |
+| Accounts, login, saved trips (History) | ✅ working | `auth.py`, `database.py` |
 | Place name → coordinates, and reverse | ✅ working | `geocoding.py` |
-| Straight‑line + real road distance | ✅ working | `distance.py`, `routing.py` |
+| Straight‑line + real road distance + route geometry | ✅ working | `distance.py`, `routing.py` |
 | Find nearby stations / bus stands / airports | ✅ working | `hubs.py` |
 | Train timetable database (8,490 trains, 170,340 stops) | ✅ built | `build_train_db.py` → `trains.db` |
-| Flight schedule database (per airport + date) | ✅ built, partial data | `build_flight_db.py` → `flights.db` |
+| Flight schedule database (per airport + date, lazily fetched) | ✅ built | `build_flight_db.py` → `flights.db` |
 | **Connectivity engine** (does mode X reach the destination on date D?) | ✅ working | `connectivity.py` |
-| Full day‑by‑day itinerary generation | ⬜ not started | — |
-| Frontend | ⬜ not started | — |
+| Attraction discovery, grounded to real coordinates | ✅ working | `attractions.py` |
+| **Practical day planning** — visit lengths, drive times, hour budgets | ✅ working | `feasibility.py` |
+| **Feasibility negotiation** — too many places? ask, don't decide | ✅ working | `/plan/feasibility` + `TooManyPlacesDialog.tsx` |
+| **Day-by-day itinerary** (LLM-reasoned, validated, with a deterministic fallback) | ✅ working | `agent.py` |
+| Food + a hotel for every day and night of the trip | ✅ working | `enrichments.py` |
+| Own-vehicle extras: fuel stops, toll plazas, rest halts | ✅ working | `enrichments.py`, `own_vehicle.py` |
+| The return leg, from the last place visited | ✅ working | `agent.py` → `plan_return_leg` |
+| Ball-park budget, re-costed in place when party size changes | ✅ working | `agent.py`, `/plan/costs` |
+| **Plain-English schedule** with clock times | ✅ working | `narrative.py` |
+| **Speciality** — famous food, crafts, signature experiences | ✅ working | `speciality.py` |
+| Change places or stays from the chat | ✅ working | `place_edits.py`, `stay_revision.py` |
+| **Streaming plans** — sections appear as they are ready | ✅ working | `agent.py` (`stream_mode="updates"`) |
+| Frontend (React + Vite + Tailwind + framer-motion) | ✅ working | `frontend/src` |
 
 ---
 
-## 2. The two pipelines
+## 2. The pipelines
 
 ### Pipeline A — Chat / slot filling
 
@@ -110,6 +124,93 @@ data, so instead of pretending, we point the user at the sites that do.
 
 ---
 
+### Pipeline C — The planning agent (LangGraph)
+
+Once the traveller has picked their places, `/plan` hands everything to a
+`StateGraph` and returns a job id immediately. The graph is the shape it is
+because planning a trip is a pipeline with **branches that don't depend on each
+other** and one step that **loops**.
+
+```
+resolve                         feasibility: do these places fit these days?
+   │                            (too many -> plan what fits, defer the rest)
+   ├──────────── fan out, run concurrently ────────────┐
+   │                         │                         │
+cluster_itinerary        plan_transport         find_specialities
+   │  ▲ retry                │                         │
+   │  └── invalid? ──────────┤                         │
+   │      (names wrong, day  │ own vehicle?            │
+   │       over its hours)   ▼                         │
+   │                   assess_drive                    │
+   ▼                   (geometry, tolls, offers)       │
+plan_stays                   │                         │
+   │                         │                         │
+   └─────────────────────────┴─────────────────────────┘
+                             ▼
+                     plan_return_leg          ← defer=True: a BARRIER, fires once
+                             ▼
+                      estimate_costs
+                             ▼
+                         assemble  →  result (+ narrative)
+```
+
+**Why the branches are parallel.** The itinerary is Gemini-bound and the
+transport check is timetable/Overpass-bound; neither needs the other. Running
+them together removes most of their combined wall time.
+
+**Why the join is deferred.** With branches of unequal length, an ordinary
+fan-in fires the join node once per incoming edge — the return leg would be
+planned twice. `defer=True` makes it wait for everything.
+
+**Why the itinerary node loops.** Gemini is asked for a day-by-day plan and the
+answer is then *checked*: every place used exactly once, day numbers contiguous,
+and **no day over its hour budget**. A failure is fed back into the re-prompt.
+After three tries it falls through to `fallback_itinerary`, a deterministic
+packing that respects the same budgets. A quota or key error skips straight to
+the fallback, since retrying changes nothing.
+
+**Why it streams.** The graph runs with `stream_mode="updates"`, so each node's
+output is published the instant that node returns. `GET /plan/{id}` carries a
+`partial` result plus `stages`/`stages_done`, and the UI paints each section as
+it lands. (`stream_mode="values"` emits only at super-step boundaries, which —
+measured — held a 2-second itinerary back until 270 seconds, because it shares a
+super-step with the slow transport branch.)
+
+---
+
+### Pipeline D — Practical day planning
+
+The part that decides whether a plan is any good. All deterministic, so it can
+be explained rather than merely trusted (`feasibility.py`):
+
+```
+places
+   │
+   ▼
+cluster_stops()          places within 35 km form one "area"
+   │
+   ▼
+order_by_cluster()       walk areas nearest-first, then 2-opt to take the
+   │                     crossings out (a greedy order backtracked ~200 km
+   │                     across Kerala and cost a whole extra day)
+   ▼
+pack_days()              fill a day until it's full, then start the next
+   │                       · visit hours by category (wildlife 4h, temple 1h)
+   │                       · driving hours between stops
+   │                       · the morning transfer from where you slept
+   │                       · 10.5h a day, 5.5h on arrival, 6.5h on the last
+   │                       · ONE AREA PER DAY unless real time remains
+   ▼
+assess()                 verdict: ok / too_short / too_long, with the numbers
+```
+
+`too_short` is not resolved silently. `/plan/feasibility` is called **before**
+planning so the UI can ask: add days, or choose fewer places? — and it keeps
+asking until the trip fits. The backend's "plan what fits and defer the rest"
+remains only as a last-resort guarantee for paths that skip the question.
+
+---
+
 ## 3. Tech stack — what and why
 
 ### Language & runtime
@@ -133,7 +234,19 @@ data, so instead of pretending, we point the user at the sites that do.
 |--------|-----|-----------|
 | **Google Gemini** (`gemini-3.6-flash`) | Fast, cheap, strong enough for structured extraction | Low latency for a chat loop; generous free tier |
 | **LangChain** (`langchain-google-genai`) | `.with_structured_output(TripSlots)` wires the Pydantic model straight into Gemini's JSON/function‑calling mode | We never write "reply in JSON" prompts or strip ```` ```json ```` fences — the model returns a validated object |
+| **LangGraph** (`agent.py`) | Planning is a pipeline with branches that don't depend on each other, one step that loops, and one that has to stop and ask the traveller | Nodes share one state object; parallel branches, a deferred barrier join, a bounded retry cycle and `interrupt()`-based human-in-the-loop all come for free — and `.stream()` gives per-node progress to the UI |
+| **Tavily** (optional) | A model asked cold will name a restaurant that shut two years ago | Live search snippets go into the prompt FIRST, so chat answers and specialities reflect what people are saying now; the UI marks results "Web-checked" only when search actually ran |
 | **python‑dotenv** | Load API keys from `.env` | Secrets stay out of code and out of git (`.gitignore`) |
+
+### Frontend
+
+| Choice | Why | Advantage |
+|--------|-----|-----------|
+| **React + TypeScript** (Vite) | The plan is a lot of interdependent state — a shared draft, a polling job, streamed partials | One `types/api.ts` mirrors the API, so a backend shape change surfaces as a compile error rather than a blank screen |
+| **Tailwind CSS** | The UI has a strong, consistent visual language (blob shapes, chunky shadows, a sunset palette) | Design tokens live in `tailwind.config.js`; every panel reaches for the same ones |
+| **framer-motion** | Sections stream in, the progress card has to feel alive, the nav pill glides between steps | `layoutId` handles the shared-element moves; `useScroll`/`useSpring` drive the backdrop parallax; `useReducedMotion` switches it all off |
+| **react-leaflet** + OSM tiles | Free map tiles, and the drive legs are real ORS geometry | Both legs draw as separate polylines — the way home leaves from the last place visited, not the destination, and is often the longer half |
+| **TanStack Query** | Attractions are fetched per destination and cached | Re-opening the picker for the same place is instant |
 
 ### Geo / maps layer (all free, keyless except ORS)
 
@@ -156,7 +269,8 @@ data, so instead of pretending, we point the user at the sites that do.
 | Choice | Why | Advantage |
 |--------|-----|-----------|
 | **SQLite** (`trains.db`, `flights.db`, `sessions.db`) | Serverless — a single file, built into Python's stdlib | Nothing to install or run; indexes make 170k‑row lookups instant; perfect for read‑heavy reference data |
-| **On‑disk JSON cache** (`.overpass_cache/`) | Overpass public servers are frequently busy (HTTP 429/504) | First good answer is saved forever (OSM hub data barely changes); repeat runs are instant and a busy server can't blank out a whole section |
+| **On‑disk JSON caches** (`.geo_cache/`, `.overpass_cache/`, `.route_cache/`, `.attractions_cache/`, `.speciality_cache/`) | Every external source is rate-limited, quota-limited or frequently busy | The first good answer is kept (roads, hub geometry and what a town is famous for barely change), so a repeat region is near-instant and a busy mirror can't blank out a section. **Failures are deliberately not cached** — a rate-limited hour must not become a permanent gap |
+| **In-memory job + negotiation state** (`_PLAN_JOBS`, `_PENDING_STAY_BAND`, LangGraph `InMemorySaver`) | A plan runs 30s–5min in a background thread and the UI polls it | No queue to run for a single-process dev server. The trade: a restart loses an in-flight job (the frontend re-submits) and a pending question (the traveller asks again) |
 
 ---
 
@@ -170,12 +284,34 @@ data, so instead of pretending, we point the user at the sites that do.
    OpenStreetMap + the train DB's own stop counts, so the logic works for any source.
 4. **Fail loud, not silent.** A busy Overpass mirror prints why; a missing destination
    railhead produces an explicit note, not an empty section.
-5. **Cache anything that's stable.** OSM geometry, Overpass answers, and flight schedules
-   per date are all cached so re‑runs are fast and quota‑friendly.
+5. **Cache anything that's stable — never cache a failure.** OSM geometry, Overpass
+   answers, routes and flight schedules per date are all cached. A failed lookup is not:
+   marking a rate-limited flight call as "checked, no flights" once turned an exhausted
+   quota into a permanent blank.
+6. **"We couldn't check" is not "there is none".** A provider being down and a genuine
+   absence are different facts, and the UI renders them differently — grey with a
+   cloud-off icon for unknown, amber for a real dead end.
+7. **Degrade per section, never as a whole.** Every stage guards itself, so a flight
+   quota or an Overpass outage costs you that one panel and nothing else. One unguarded
+   exception used to discard a finished itinerary, map and budget along with it.
+8. **Never present an impossible plan.** Hour budgets are enforced in validation, not
+   merely requested in a prompt — an LLM told "keep days realistic" still returns a
+   15-hour day.
+9. **When something has to give, the traveller chooses.** Too many places for the days
+   is a question, not a silent trim.
 
 ---
 
 ## 5. How to run
+
+Full instructions, including what to expect on a cold region, are in
+[`README.md`](./README.md) and [`RUNNING.md`](./RUNNING.md). The short version —
+two processes, backend on `:8000` and frontend on `:5173`:
+
+```bash
+# frontend
+cd trip-planner/frontend && npm install && npm run dev
+```
 
 ```bash
 cd trip-planner/backend
@@ -190,11 +326,18 @@ python build_flight_db.py       # AeroDataBox  -> flights.db  (needs RAPIDAPI_KE
 # chat (terminal)
 python chat_loop.py
 
-# chat (HTTP API)
-uvicorn main:app --reload       # POST http://127.0.0.1:8000/chat
+# the API (this is what the frontend talks to)
+python -m uvicorn main:app --reload
 
-# connectivity engine (demo in __main__)
-python connectivity.py
+# individual pieces, each with a demo in __main__
+python connectivity.py          # does train/bus/flight reach a destination?
+python feasibility.py           # (imported) day packing and hour budgets
+python speciality.py            # what a place is famous for
+python agent.py                 # a whole plan, printed
 ```
+
+`.env` must contain `GEMINI_API_KEY` and `JWT_SECRET`; `ORS_API_KEY`,
+`RAPIDAPI_KEY` and `TAVILY_API_KEY` each unlock a section and degrade to an
+honest "couldn't check this" when absent.
 
 `.env` must contain: `GEMINI_API_KEY`, `ORS_API_KEY`, `RAPIDAPI_KEY`.

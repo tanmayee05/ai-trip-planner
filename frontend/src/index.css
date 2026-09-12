@@ -6,7 +6,7 @@
   :root {
     color-scheme: light;
     /* top bar + journey nav — used by scroll anchors */
-    --nav-offset: 8.25rem;
+    --nav-offset: 8.875rem;
   }
   html {
     -webkit-font-smoothing: antialiased;
@@ -184,6 +184,19 @@
   .dot-grid {
     background-image: radial-gradient(rgba(14, 27, 44, 0.07) 1.5px, transparent 1.5px);
     background-size: 22px 22px;
+  }
+
+  /* The mesh wash, but alive. `bg-mesh` paints four radial washes at fixed
+     corners; oversizing the layers gives their positions somewhere to travel,
+     so the backdrop drifts instead of sitting still.
+
+     The MOTION deliberately lives on the `animate-mesh-breathe` utility in
+     the markup, not here: Tailwind only emits an @keyframes block for
+     animations it sees used through an `animate-*` class, so declaring
+     `animation: mesh-breathe` in here got the keyframes tree-shaken out and
+     the animation silently did nothing. */
+  .bg-mesh-live {
+    will-change: transform;
   }
 
   /* faint topographic contours — the ambient travel texture */

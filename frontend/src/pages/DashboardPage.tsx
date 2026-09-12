@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import {
+  AnimatePresence, motion, useReducedMotion, useScroll, useSpring, useTransform,
+} from "framer-motion";
 import {
   History, RotateCcw, MapPin, CalendarDays, Compass, Route, Map as MapIcon,
   Bus, Car, Fuel, Wallet, SlidersHorizontal, ChevronDown, BedDouble, Undo2, Sparkles,
@@ -45,6 +47,18 @@ const zone = {
 
 export function DashboardPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
+
+  // ---- backdrop parallax -------------------------------------------------
+  // The decor drifts a fraction of the page's scroll, so the plan reads as
+  // sitting ABOVE the sky rather than pasted onto it. Springing the value
+  // keeps it from tracking the wheel one-to-one, which is what makes cheap
+  // parallax feel jittery. Honoured off entirely under reduced-motion.
+  const reduceMotion = useReducedMotion();
+  const { scrollY } = useScroll();
+  const skyRaw = useTransform(scrollY, [0, 2400], [0, -220]);
+  const hazeRaw = useTransform(scrollY, [0, 2400], [0, -90]);
+  const skyY = useSpring(skyRaw, { stiffness: 60, damping: 22, restDelta: 0.5 });
+  const hazeY = useSpring(hazeRaw, { stiffness: 50, damping: 24, restDelta: 0.5 });
   const plan = usePlanJob();
 
   // trip basics captured from the form/chat, held while the user picks stops
@@ -344,9 +358,27 @@ export function DashboardPage() {
   return (
     /* overflow-x-clip (not -hidden) — `hidden` would make this a scroll
        container and quietly break every `position: sticky` inside it */
-    <div className="relative min-h-screen overflow-x-clip bg-cream bg-mesh">
-      <div className="contours pointer-events-none absolute inset-0" aria-hidden />
-      <Doodles />
+    <div className="relative min-h-screen overflow-x-clip bg-cream">
+      {/* the colour wash on its own layer so it can drift on a GPU transform
+          rather than repainting a full-viewport gradient every frame */}
+      <div
+        className="bg-mesh bg-mesh-live animate-mesh-float pointer-events-none absolute inset-0"
+        aria-hidden
+      />
+      {/* two backdrop layers at different parallax depths: the contour texture
+          sits close and barely shifts, the sky decor sits far and travels more */}
+      <motion.div
+        className="contours animate-contour-drift pointer-events-none absolute inset-x-0 -bottom-32 top-0"
+        style={reduceMotion ? undefined : { y: hazeY }}
+        aria-hidden
+      />
+      <motion.div
+        className="pointer-events-none absolute inset-x-0 -bottom-64 top-0"
+        style={reduceMotion ? undefined : { y: skyY }}
+        aria-hidden
+      >
+        <Doodles />
+      </motion.div>
       <Confetti fireKey={celebrate} />
 
       <TopBar

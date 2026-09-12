@@ -54,6 +54,49 @@ export function Doodles({ className }: { className?: string }) {
         </svg>
       ))}
 
+      {/* ---- a skein of birds, crossing lower and faster than the clouds so
+              the two layers read as different distances ---- */}
+      {[
+        { top: "22%", dur: "64s", delay: "-12s", scale: 0.9, opacity: 0.32 },
+        { top: "47%", dur: "82s", delay: "-46s", scale: 0.6, opacity: 0.22 },
+      ].map((f, i) => (
+        <div
+          key={`flock-${i}`}
+          className="absolute left-0 animate-drift"
+          style={{
+            top: f.top,
+            opacity: f.opacity,
+            animationDuration: f.dur,
+            animationDelay: f.delay,
+          }}
+        >
+          <svg
+            className="h-10 w-24 text-ink"
+            viewBox="0 0 96 40"
+            fill="none"
+            style={{ transform: `scale(${f.scale})` }}
+          >
+            {[
+              { x: 10, y: 22, d: "0s" },
+              { x: 30, y: 12, d: "-0.25s" },
+              { x: 50, y: 6, d: "-0.5s" },
+              { x: 66, y: 16, d: "-0.15s" },
+              { x: 84, y: 26, d: "-0.4s" },
+            ].map((b, j) => (
+              <path
+                key={j}
+                d={`M${b.x} ${b.y} q 5 -5 10 0 q -5 -2.5 -10 0`}
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                className="animate-wing"
+                style={{ transformOrigin: `${b.x + 5}px ${b.y}px`, animationDelay: b.d }}
+              />
+            ))}
+          </svg>
+        </div>
+      ))}
+
       {/* ---- faint stars, high up ---- */}
       {stars.map((s, i) => (
         <span

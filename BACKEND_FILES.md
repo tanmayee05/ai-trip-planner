@@ -1,5 +1,7 @@
 # Backend — File‑by‑File Logic
 
+_Last updated: 2026-09-12_
+
 _Companion to [`PROJECT_OVERVIEW.md`](./PROJECT_OVERVIEW.md). Database build details are in
 [`DATABASES.md`](./DATABASES.md)._
 
@@ -66,25 +68,55 @@ meaningless without knowing the question. Passing `last_question` fixes that.
 
 ### `main.py` — the HTTP API (FastAPI)
 
-**Job:** the same conversation loop as `chat_loop.py`, but as a stateless `/chat`
-endpoint that many clients can call.
+**Job:** every endpoint the frontend talks to. `init_db()` runs on import so the
+tables always exist, and CORS is opened to the Vite dev and preview ports.
 
-- `init_db()` runs on import so the `sessions` table always exists.
-- `ChatRequest` — `{ session_id?: str, message: str }`.
-  `ChatResponse` — `{ session_id, reply, slots, ready_to_plan }`.
-- `POST /chat` flow:
-  1. `load_session(session_id)` — if it exists, restore `slots` + `last_question`;
-     otherwise mint a new `uuid4` session with empty slots.
-  2. `update_slots(slots, message, last_question)` — extract + merge.
-  3. `next_question(slots)` — `None` ⇒ `reply = "Great, I have everything I need!"`,
-     `ready_to_plan = True`. Otherwise the reply **is** the next question.
-  4. `save_session(...)` — persist slots + the question we just asked.
-  5. Return the response (`slots.model_dump()` turns the Pydantic object into a dict).
-- `GET /health` — trivial liveness check.
+| Endpoint | What it does |
+|----------|--------------|
+| `POST /auth/signup` · `POST /auth/login` · `GET /auth/me` | Accounts. Passwords are bcrypt-hashed, the reply carries a JWT |
+| `POST /attractions` | Places for a destination, via `attractions.get_attractions()` — cached per destination, so a repeat is instant |
+| `POST /plan` | Geocodes the endpoints (a bad name is a fast `422`), makes the transport target the **centroid of the picked stops**, then starts the agent on a background thread and returns `202` with a job id |
+| `GET /plan/{job_id}` | Poll. Carries `state`, the finished `result`, **and while running a `partial` result plus `stages` / `stages_done`** — which is what lets the UI paint sections as they land |
+| `POST /plan/feasibility` | Do these places fit these days? Assesses without planning anything, so the UI can put the choice — more days, or fewer places — to the traveller *first* |
+| `POST /plan/costs` | Re-runs `agent.estimate_costs` against a plan already on screen. Party size changes the per-head arithmetic and nothing else, so it would be absurd to re-plan the trip for it |
+| `POST /plan/enrich` | On-demand extras for own-vehicle trips: fuel estimate, fuel stops, food, a rest-stop hotel |
+| `POST /chat` | One turn of the conversation — see below |
+| `GET /chat/{session_id}` | Rehydrate a transcript, using the same readiness checklist as a live turn |
+| `GET /trips` · `GET /trips/{trip_id}` · `DELETE /trips/{trip_id}` | Saved trips, for the History drawer |
+| `GET /health` | Liveness |
+
+**The plan job table.** `_PLAN_JOBS` is an in-memory dict; a worker thread writes
+`partial` / `stages_done` into it as the agent streams, and the poll endpoint
+reads them. Fine for a single-process dev server — a restart loses an in-flight
+job and the frontend simply re-submits. A real deployment would want a queue.
+
+**`POST /chat` is more than slot filling.** In order, a turn:
+
+1. **Resumes a pending stay negotiation** if one is open for this session. The
+   message is the *answer* to that question, so it must not go through slot
+   extraction — "just day 2" would otherwise be read as a travel date.
+2. **Handles a place edit** ("also include Hampi", "drop Varkala") — resolves the
+   name against a known list, re-plans just the days via
+   `agent.plan_itinerary_only()`, and returns an `itinerary_patch`. This runs
+   *before* extraction too: "include Alleppey" was being read as a new
+   destination, which then broke the lookup for that very place.
+3. **Folds in what the form already knows** (`known`), so the assistant never
+   re-asks for something visible on screen.
+4. **Extracts new slots** — guarded, because a transient LLM/network failure must
+   not take the whole conversation down with a `500`.
+5. **Answers a question** if the traveller asked one, then folds the next slot
+   question in as a follow-up.
+6. **Offers a stay change** if the message named a price band and a plan exists —
+   suggest, then *ask* which nights, via `stay_revision.propose()`.
+
+The response therefore carries not just `reply` / `slots` / `ready_to_plan` but
+optionally a `pending_action` (a question awaiting an answer), a `stays_patch`,
+or an `itinerary_patch` for the UI to apply to the plan on screen.
 
 **Why session_id + DB:** HTTP is stateless. The client holds only an opaque
-`session_id`; all real state (the half‑filled form, the last question) lives in
-`sessions.db`, so the conversation survives across requests and restarts.
+`session_id`; all real state (the half-filled form, the last question, the
+transcript) lives in `sessions.db`, so a conversation survives across requests
+and restarts.
 
 ---
 
@@ -329,7 +361,159 @@ considered, and the near‑source hubs that were checked but don't connect.
 
 ---
 
-## Group 6 — Scratch / test scripts (not part of the pipeline)
+## Group 6 — The planning brain
+
+### `agent.py` — the LangGraph trip-planning agent
+
+The thing `/plan` actually runs. A `StateGraph` over one `TripState`, shaped that
+way because planning has branches that don't depend on each other, a step that
+loops, and steps that can fail independently.
+
+| Function | Role |
+|----------|------|
+| `resolve()` | Marks the run started and, crucially, computes **feasibility before any planning** — so the itinerary prompt can be told the truth ("these want 5 days, you have 3"). When the places don't fit, trims the stop list to what does and records the rest in `deferred` |
+| `cluster_itinerary()` | Asks Gemini for a day-by-day plan, then **validates** it: every place used exactly once, day numbers contiguous, no interior blank days, no day over its hour budget. A failure comes back as `itinerary_error` and the conditional edge loops round with it folded into the re-prompt |
+| `_validate()` / `_practicality_error()` | The two halves of that check — shape, then practicality. The second is where a 13-hour day gets rejected. One-stop days are exempt, because a single 6-hour place cannot be split and the error would ask for the impossible |
+| `_fill_trip_days()` | Guarantees every day the traveller booked appears. Ask for 3 days with two nearby places and the planner rightly uses 2 — day 3 then shows as a free/departure day instead of vanishing and making the itinerary look truncated |
+| `fallback_itinerary()` | Deterministic packing (via `feasibility.pack_days`) when Gemini cannot produce a valid plan in three tries. Respects the same hour budgets, so even the fallback is doable |
+| `_is_fatal_llm_error()` | Quota, rate-limit and bad-key errors skip the retries and go straight to the fallback. Retrying changes nothing except the wait |
+| `plan_stays()` | Food and a hotel for the trip, via `enrichments` |
+| `find_specialities()` | What the destination is famous for, via `speciality` |
+| `plan_transport()` | `check_all_modes()` for public transport, or a drive plan for own vehicle |
+| `assess_drive()` | Own-vehicle only: real road geometry, toll plazas, and the optional "want food / a rest stop?" offers |
+| `plan_return_leg()` | The trip home — from the **last place visited**, not the destination. `defer=True` on this node makes it a barrier that fires once instead of once per incoming branch |
+| `estimate_costs()` | Fuel, tolls, food and stay arithmetic. Pure, so `/plan/costs` can re-run it for a party-size change without re-planning the trip |
+| `assemble()` | Builds the API `result`, then `narrative` last so it can draw on transport, stays and itinerary together |
+| `partial_result()` | The plan so far, in the finished shape — what streaming publishes. Pure: it copies rather than mutating live state |
+| `run_trip_plan()` | Runs the graph. Given an `on_progress` callback it uses `stream_mode="updates"` and accumulates state itself, so each node's output is published the moment that node returns |
+| `plan_itinerary_only()` | Re-plans just the days for a changed stop list (a chat edit). Reuses the same nodes, so the rules cannot diverge from the full path |
+| `plan_stages()` / `stages_done()` | The stage list the progress UI draws, and which are genuinely finished — read from state, not the node log, because a failed retry logs a line without having produced anything |
+
+### `feasibility.py` — is this trip actually doable?
+
+All deterministic, no LLM. It runs on every plan and has to be *explainable*
+("Munnar needs about 4 hours, and it is 3 hours from Kochi") rather than merely
+plausible.
+
+| Function | Role |
+|----------|------|
+| `VISIT_HOURS` | How long each category really takes (wildlife 4h, hill station 4h, temple 1h...). **Every "needs N days" claim traces back to this dict**, so it is the one place to tune if your pace differs |
+| `travel_hours()` | Crow-flies x 1.3 road detour / 40 km/h — a realistic Indian state-highway average |
+| `day_budget()` | 10.5h on a normal day, 5.5h on arrival, 6.5h on the last |
+| `day_load()` | What a day really costs: the visits, the driving between them, **and** the morning transfer from wherever the night was spent. Omitting that last term made the packing far too optimistic |
+| `cluster_stops()` | Single-link grouping at 35 km — the "areas" you would naturally cover in one go |
+| `order_by_cluster()` + `_improve_cluster_order()` | Walk the areas nearest-first, then 2-opt the sequence to take out the crossings. A purely greedy order ran down the Kerala coast, back inland for the hill stations, then south again: ~200 km and a whole extra day |
+| `pack_days()` | Fill a day until it is full, then start the next. One area per day, unless real touring time would still remain after the drive |
+| `assess()` | The verdict — `ok` / `too_short` / `too_long` — with the numbers and a sentence to put to the traveller |
+| `split_by_what_fits()` | `(will_fit, wont_fit)` for the time available. The last-resort guarantee that a plan is never impossible |
+
+### `itinerary.py` — route primitives
+
+`order_stops()` (nearest-neighbour from a point), `region_center()` (the centroid
+handed to `check_all_modes` as the transport target, so the arrival hub lands in
+the middle of the trip region rather than at a vague state point), and the legacy
+`split_into_days()`. That last one is the even split — `day = i * days // n + 1`
+— which `feasibility.pack_days` replaced; it is what used to put a tiger reserve
+and a hill station 120 km apart in the same afternoon.
+
+### `narrative.py` — the plan in plain English
+
+Turns the structured result into a running schedule: set off at 07:00, check in
+at 11:12, first stop and how long to allow, the drive on, lunch, dinner, the
+night. Deterministic, and built from the same hour figures the days were packed
+with, so the prose cannot describe a different trip from the one planned. It
+doubles as a feasibility check a human can read — a day ending "20:38 Auroville,
+23:08 start back" is obviously wrong in a way a table of hours never is.
+
+---
+
+## Group 7 — Places, extras and conversation
+
+### `attractions.py` — what is worth seeing
+
+Gemini names the places; **Nominatim grounds them to real coordinates**, and that
+grounding is then checked. A bare `<name>, India` query can match anywhere in the
+country: "Skandashramam", a cave 1 km from Arunachaleswarar Temple, was being
+pinned in Chennai 140 km away — and the whole itinerary was then planned around
+that phantom distance. A broad-query match is now rejected unless it lands within
+`SAME_TOWN_MAX_KM` of the town the model named. Results are scoped `in` /
+`nearby` and cached per destination.
+
+### `speciality.py` — what the place is famous for
+
+Rose milk in Rajahmundry, Kanchipuram silk, Kerala's houseboats. **Tavily first**
+for current web snippets, **then** Gemini to structure them — the order matters,
+because a model asked cold will confidently name a restaurant that shut two years
+ago. Each item is tagged `food` / `sweet` / `drink` / `craft` / `experience`,
+with the well-known shop where there is one and a rough price. It returns
+`grounded` so the UI can claim "Web-checked" only when search actually ran, and
+returns nothing rather than inventing a speciality for a town that has none.
+
+### `enrichments.py` — fuel, food, stays, tolls
+
+| Function | Role |
+|----------|------|
+| `estimate_fuel()` / `fuel_stops_along_route()` | Litres and cost for a given mileage and fuel type; real OSM petrol pumps sampled along the driving line, optionally filtered to one brand |
+| `toll_plazas_along_route()` | Toll booths on the path, with a car estimate folded into the budget |
+| `enrich_food()` / `enrich_stay()` | On-demand "food on the way" and "a rest-stop hotel" for a long drive |
+| `stays_and_food_for_itinerary()` | **Food for every day of the trip, a hotel for every night of it.** Deliberately not keyed off "days that have stops": an arrival day with no sightseeing is still a night in a hotel, and you eat on the last day too. A travel day anchors on where the *next* day starts, which is where you would actually want to sleep |
+| `stays_for_days()` | Re-pick hotels for specific days in a specific price band — used by the chat negotiation |
+| `STAYS_BUDGET_S` | A wall-clock budget for the whole section. Each night costs a Gemini call plus rate-limited geocoding (~20s), so an unbounded loop on a long trip would outlast the client and take the whole plan down with it. Nights it cannot reach come back marked `skipped` for the UI to offer on demand |
+
+### `chat_reply.py` — answering, not just interrogating
+
+`looks_like_question()` decides whether a message is a request for information or
+an answer to the pending slot question. `answer_question()` answers it — grounded
+in Tavily results when a key is present — and the caller then folds the next slot
+question in as a follow-up, so the assistant does not talk over the traveller
+with form fields. `wants_change()` separates "best hotels in Vizag?" (a question
+asked about a Kerala trip, which must not overwrite the destination) from
+"actually make it Vizag" (which must).
+
+### `stay_prefs.py` — reading a stay preference
+
+`detect_stay_band()` requires **both** a band word and a stay word, so "we are on
+a tight budget" and "premium trains" are not read as hotel instructions.
+`parse_scope()` turns the reply into `"all"`, `"none"`, or a **list** of nights
+("days 1 and 2"). Matching is whole-word via `_has_phrase()`: a plain substring
+test reads "looks fine", "book it" and "not sure" as consent — which would have
+silently rewritten every hotel in the plan. Hedging returns `None`, so the caller
+asks again rather than guessing.
+
+### `stay_revision.py` — human-in-the-loop, properly
+
+"Recommend premium stays" is not a question with one answer; it is the start of a
+negotiation: suggest, **stop and ask**, then change only what was agreed.
+LangGraph's `interrupt()` models exactly that — it suspends mid-node, the state
+persists under a thread id (the chat session), and a later `Command(resume=...)`
+picks up where it stopped, which is what lets the pause span two separate HTTP
+requests without a hand-rolled state machine. The merge preserves each night's
+food picks, and every night it was not asked to touch.
+
+### `place_edits.py` — "also include Hampi" / "drop Varkala"
+
+The hard part is the place *name*, not the verb. A candidate phrase is pulled out
+with a regex and then **matched against a list we already know** — the trip's own
+stops for a removal, the destination's attractions for an addition. Matching
+against a known set is what makes it reliable, and it means an addition arrives
+with real coordinates, a category and a blurb instead of a bare name. No match
+asks for clarification rather than removing the wrong place.
+
+### `own_vehicle.py` / `budget.py`
+
+Earlier standalone helpers for drive planning and cost breakdown. The live paths
+are `agent._drive_plan` / `agent.assess_drive` and `agent.estimate_costs`; these
+remain as readable references for the same arithmetic.
+
+### `auth.py` — accounts
+
+`hash_password` / `verify_password` (bcrypt), `create_access_token` (JWT), and the
+FastAPI dependencies `get_current_user_id` (required) and `get_optional_user_id`
+— the latter so planning still works while logged out, it just is not saved.
+
+---
+
+## Group 8 — Scratch / test scripts (not part of the pipeline)
 
 | File | Purpose |
 |------|---------|
@@ -342,9 +526,22 @@ considered, and the near‑source hubs that were checked but don't connect.
 ## Quick reference — who calls whom
 
 ```
-main.py ─┬─ database.py            (sessions.db)
+main.py ─┬─ auth.py / database.py           (sessions.db: users, sessions, trips)
+         ├─ attractions.py                  (Gemini + Nominatim grounding)
+         ├─ agent.py                        (the planning graph — below)
+         ├─ feasibility.py                  (/plan/feasibility)
+         ├─ enrichments.py                  (/plan/enrich)
          ├─ slot_extraction.py ── LangChain ── Gemini
-         └─ trip_slots.py
+         ├─ chat_reply.py ── Tavily + Gemini
+         ├─ place_edits.py                  (chat: add / remove a place)
+         └─ stay_prefs.py + stay_revision.py  (chat: change the stays)
+
+agent.py ─┬─ feasibility.py ── itinerary.py ── distance.py
+          ├─ connectivity.py                (see below)
+          ├─ enrichments.py ── hubs.py / geocoding.py / Gemini
+          ├─ speciality.py ── Tavily + Gemini
+          ├─ routing.py                     (ORS road geometry)
+          └─ narrative.py ── feasibility.py (the same hour figures)
 
 connectivity.py ─┬─ hubs.py ─┬─ geocoding.py        (Nominatim)
                  │           ├─ distance.py          (Haversine)
@@ -354,3 +551,11 @@ connectivity.py ─┬─ hubs.py ─┬─ geocoding.py        (Nominatim)
                  ├─ routing.py                       (ORS)
                  └─ geocoding.py                     (Nominatim)
 ```
+
+Two properties hold throughout that call graph:
+
+- **Each transport mode inside `check_all_modes()` is guarded independently.** A
+  flight-API outage costs you the Flight tab, not the train and bus results.
+- **Every node in `agent.py` degrades on its own.** One unguarded exception used
+  to discard a finished itinerary, map and budget along with the thing that
+  actually failed.
